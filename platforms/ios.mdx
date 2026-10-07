@@ -1,7 +1,7 @@
 ---
-title: "iOS Platform: Secure Enclave Integration"
+title: "iOS: Secure Enclave, Biometrics, and Passkey Guide"
 sidebarTitle: "iOS"
-description: "How the plugin uses the iOS Secure Enclave for hardware-backed P-256 key storage, Face ID / Touch ID biometrics via LAPolicy, and platform passkeys via AuthenticationServices."
+description: "How the plugin stores P-256 keys in the iOS Secure Enclave, maps BiometryType to LAPolicy, and integrates passkeys via AuthenticationServices."
 ---
 
 The iOS implementation of `@perfood/capacitor-crypto-api` stores every private key directly inside the **Secure Enclave** — a dedicated security co-processor present on all iPhones with Apple A7 or later. Private key material never leaves the enclave; all signing and key-agreement operations are performed inside it. The public API surface is identical to the Android and web implementations, so your TypeScript code runs without changes across all three platforms.

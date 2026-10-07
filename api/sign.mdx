@@ -1,6 +1,6 @@
 ---
-title: "sign — ECDSA Sign Data with Secure Hardware Key"
-sidebarTitle: "sign"
+title: "sign — ECDSA Signing with Secure Hardware Private Key"
+sidebarTitle: "Sign"
 description: "Sign data using an ECDSA private key in the Secure Enclave (iOS), StrongBox/TEE (Android), or WebCrypto (Web). Returns a base64 ASN.1 DER signature."
 ---
 
@@ -23,8 +23,8 @@ CryptoApi.sign(options: SignOptions): Promise<SignResponse>
 <ParamField body="data" type="string" required>
   The raw data to sign as a plain string. The plugin applies SHA-256 hashing
   internally — do **not** hash this value yourself before passing it. On Web,
-  the string is UTF-8 encoded and then base64-encoded before the signing
-  operation.
+  the string is encoded with `btoa` before the signing operation; pass
+  ASCII-safe values to ensure cross-platform consistency.
 </ParamField>
 
 <ParamField body="type" type="BiometryType">
@@ -79,10 +79,13 @@ CryptoApi.sign(options: SignOptions): Promise<SignResponse>
     authentication is enforced at the OS level when required.
   </Tab>
   <Tab title="Web">
-    Uses the browser's **WebCrypto API** (`SubtleCrypto.sign`). The private key
-    is stored in `localStorage` in PKCS#8 format (base64). Biometry is not
-    supported on Web — the `type` parameter is ignored. Only available in
-    **secure contexts** (`https://`).
+    Uses the browser's **WebCrypto API** (`SubtleCrypto.sign`). `SubtleCrypto`
+    returns a signature in **IEEE P1363** (`r || s`) format; the plugin
+    internally converts it to **ASN.1 DER** (via
+    [`p1363ToDer`](/api/utilities#p1363toder)) before returning, so all
+    platforms return DER. The private key is stored in `localStorage` in
+    PKCS#8 format (base64). Biometry is not supported on Web — the `type`
+    parameter is ignored. Only available in **secure contexts** (`https://`).
   </Tab>
 </Tabs>
 

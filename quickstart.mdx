@@ -1,7 +1,7 @@
 ---
-title: "Get Started with Capacitor Crypto API"
+title: "Capacitor Crypto API Quickstart: Sign, Verify, Encrypt"
 sidebarTitle: "Quickstart"
-description: "Step-by-step guide to generate an ECDSA key pair in secure hardware, sign data, verify a signature, then encrypt and decrypt a message with ECDH and AES-GCM."
+description: "Generate an ECDSA key pair in secure hardware, sign data, verify a signature, and encrypt and decrypt messages with ECDH and AES-GCM."
 ---
 
 This guide walks through the two most common cryptographic workflows in `@perfood/capacitor-crypto-api`: **ECDSA signing** for challenge-response authentication, and **ECDH encryption** for end-to-end encrypted messaging. Both flows use the same `generateKey` entry point and work identically on iOS (Secure Enclave), Android (StrongBox/TEE), and Web (WebCrypto) — your TypeScript code is the same on every platform.

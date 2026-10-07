@@ -1,7 +1,7 @@
 ---
-title: "Protect Keys with Biometric Authentication"
+title: "Protect Cryptographic Keys with Biometric Authentication"
 sidebarTitle: "Biometrics"
-description: "Gate cryptographic operations behind Face ID, fingerprint, or device passcode using BiometryType on generateKey, sign, encrypt, and decrypt — with runtime status checks."
+description: "Gate key operations behind Face ID, fingerprint, or passcode using BiometryType on generateKey, sign, encrypt, and decrypt — with runtime status checks."
 ---
 
 Biometric authentication adds a second layer of protection to hardware-backed keys. When you associate a key with a `BiometryType`, the OS requires the user to present their biometrics or passcode before the secure hardware performs the requested operation — the private key is never exposed regardless. This guide explains how to check device capabilities at runtime, generate biometric-protected keys, and use them for signing and encryption.

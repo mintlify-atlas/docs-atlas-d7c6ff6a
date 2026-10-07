@@ -1,6 +1,6 @@
 ---
 title: "encrypt — AES-GCM Encrypt Using ECDH Key Agreement"
-sidebarTitle: "encrypt"
+sidebarTitle: "Encrypt"
 description: "Encrypt plaintext with AES-256-GCM via ECDH key agreement using a hardware-backed key and a recipient's public key. Returns base64 IV and ciphertext."
 ---
 
@@ -23,7 +23,7 @@ CryptoApi.encrypt(options: EncryptOptions): Promise<EncryptResponse>
   </Step>
   <Step title="AES-256-GCM key derivation">
     The shared secret is used directly as a 256-bit AES-GCM key
-    (`SECRET_KEY_LENGTH = 256`). No additional KDF step is applied.
+    (`SECRET_KEY_LENGHT = 256`). No additional KDF step is applied.
   </Step>
   <Step title="Random IV generation">
     A cryptographically random 12-byte (96-bit) IV is generated for each

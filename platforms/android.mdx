@@ -1,7 +1,7 @@
 ---
-title: "Android Platform: StrongBox and TEE Key Storage"
+title: "Android: StrongBox, TEE Key Storage and Biometrics"
 sidebarTitle: "Android"
-description: "How the plugin uses Android StrongBox and TEE for hardware-backed EC key storage, BiometricManager authenticator types, ECDH support requirements, and passkey integration."
+description: "How the plugin stores EC keys in StrongBox or TEE, maps BiometryType to BiometricManager.Authenticators constants, and supports passkeys on Android."
 ---
 
 The Android implementation of `@perfood/capacitor-crypto-api` stores all private keys inside the **Android Keystore** and targets the strongest available hardware on the device. When a **StrongBox** security chip (a discrete, tamper-resistant co-processor) is present the plugin directs key generation there. If StrongBox is unavailable it falls back to the device's **Trusted Execution Environment (TEE)** — a hardware-isolated execution environment present on virtually all Android devices shipping with API level 23 or higher.

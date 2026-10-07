@@ -1,7 +1,7 @@
 ---
-title: "Web Platform: WebCrypto API for Development"
+title: "Web: WebCrypto API Dev Shim with localStorage Keys"
 sidebarTitle: "Web"
-description: "The web implementation uses window.crypto.subtle and stores key pairs in localStorage under CryptoApiECDSA: and CryptoApiECDH: prefixes. Intended for development use only."
+description: "Browser shim using WebCrypto for P-256 ECDSA/ECDH, storing keys in localStorage under CryptoApiECDSA:/CryptoApiECDH: prefixes. HTTPS required."
 ---
 
 The web implementation of `@perfood/capacitor-crypto-api` provides a fully functional, API-compatible shim that runs in the browser without any native code. It uses the browser's built-in **`window.crypto.subtle`** (WebCrypto API) for all cryptographic operations and **`localStorage`** for key pair persistence. This allows you to develop and test your application in a browser or Capacitor web view before deploying to a real iOS or Android device.
@@ -80,13 +80,13 @@ The `type` (`BiometryType`) parameter is **accepted but ignored** on the web —
 
 Signing uses `crypto.subtle.sign` with `{ name: 'ECDSA', hash: 'SHA-256' }`. The WebCrypto API produces signatures in **IEEE P1363 (raw)** format — 64 bytes for P-256. The web implementation converts this to **ASN.1 DER** format using `p1363ToDer` before returning, so the output is identical to what iOS and Android produce:
 
-```
+```text
 WebCrypto (P1363) ──p1363ToDer──► base64(DER) ← returned to caller
 ```
 
 Verification goes in the opposite direction: the incoming base64-DER signature is converted back to P1363 with `derToP1363` before being passed to `crypto.subtle.verify`:
 
-```
+```text
 base64(DER) ──derToP1363──► P1363 ──► crypto.subtle.verify
 ```
 

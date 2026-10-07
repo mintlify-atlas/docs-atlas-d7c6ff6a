@@ -1,7 +1,7 @@
 ---
 title: "Capacitor Crypto API: Hardware-Backed Cryptography"
 sidebarTitle: "Introduction"
-description: "A Capacitor plugin that leverages the Secure Enclave (iOS), StrongBox/TEE (Android), and WebCrypto (Web) for ECDSA signing, ECDH encryption, passkeys, and biometric-gated key access."
+description: "Hardware-backed ECDSA signing, ECDH encryption, WebAuthn passkeys, and biometric key protection for Capacitor apps on iOS, Android, and Web."
 ---
 
 `@perfood/capacitor-crypto-api` is a Capacitor plugin that gives your cross-platform mobile app direct access to the device's secure hardware for cryptographic operations. On iOS it delegates to the **Secure Enclave**, on Android it uses **StrongBox** (falling back to the Trusted Execution Environment), and in the browser it uses the **WebCrypto API** so you can develop and test without a physical device. Private keys are generated inside the secure hardware and can never be extracted — they can only be used for signing or key-agreement operations, optionally gated behind biometric authentication.

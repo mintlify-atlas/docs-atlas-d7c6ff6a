@@ -118,6 +118,10 @@ CryptoApi.isDevicePasscodeSet(): Promise<DevicePasscodeResponse>
 
 Returns whether a device-level passcode (PIN, pattern, or password) is configured. A passcode is a prerequisite for hardware-backed key storage on both iOS and Android; keys cannot be created with biometric protection unless a passcode fallback exists. On Web this always resolves to `{ isDevicePasscodeSet: false }`.
 
+<Note>
+  This method is also covered in the [Device Security API](/api/device), which additionally documents `hasSecureHardware` for checking whether a hardware security enclave (Secure Enclave / StrongBox) is present.
+</Note>
+
 ### Response
 
 <ResponseField name="isDevicePasscodeSet" type="boolean">

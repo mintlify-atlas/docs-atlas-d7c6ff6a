@@ -1,7 +1,7 @@
 ---
 title: "registerPasskey — Create a WebAuthn Passkey Credential"
-sidebarTitle: "registerPasskey"
-description: "Create a hardware-backed WebAuthn passkey credential on iOS, Android, and Web using CryptoApi.registerPasskey with full parameter and response documentation."
+sidebarTitle: "Register Passkey"
+description: "Create a hardware-backed WebAuthn passkey credential on iOS, Android, and Web using CryptoApi.registerPasskey with complete parameter and response docs."
 ---
 
 `CryptoApi.registerPasskey` performs the WebAuthn **registration ceremony** — it creates a new public-key credential that is bound to the device's secure hardware and associates it with a relying party (your server). On iOS the credential is backed by the Secure Enclave; on Android it is backed by StrongBox or TEE; on Web it delegates to `navigator.credentials.create` via the WebAuthn API.

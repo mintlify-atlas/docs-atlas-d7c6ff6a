@@ -1,7 +1,7 @@
 ---
 title: "Passwordless Authentication with WebAuthn Passkeys"
 sidebarTitle: "Passkeys"
-description: "Register and authenticate users with hardware-backed passkeys using CryptoApi.registerPasskey and CryptoApi.authenticateWithPasskey — no passwords required."
+description: "Register and authenticate users with hardware-backed passkeys using registerPasskey and authenticateWithPasskey — phishing-resistant and password-free."
 ---
 
 Passkeys are phishing-resistant credentials built on the WebAuthn (FIDO2) standard. Instead of a password, the user's device generates a cryptographic key pair and stores the private key in secure hardware, protected by biometrics or device PIN. The plugin wraps the native passkey platform dialogs on iOS (Face ID / Touch ID) and Android (fingerprint / face unlock) and provides a compatible Web implementation via the browser's `navigator.credentials` API — so the same TypeScript code works across all three platforms.

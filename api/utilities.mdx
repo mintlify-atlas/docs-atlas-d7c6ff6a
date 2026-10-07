@@ -92,8 +92,8 @@ Converts an ASN.1 DER-encoded ECDSA signature (the format produced by iOS Secure
 
 **Conversion steps performed internally:**
 
-1. The DER bytes are hex-encoded for parsing.
-2. The length of `r` is read from offset 3 of the hex string (`rLength`).
+1. The DER bytes are hex-encoded for parsing (2 hex characters per byte).
+2. The length of `r` is read from hex-string position 6 (byte index 3 in the DER stream — the `INTEGER` length byte after the `SEQUENCE` tag, total-length, and `INTEGER` tag).
 3. `r` and `s` are extracted from their `INTEGER` TLV positions.
 4. If `r` or `s` is longer than 32 bytes (due to a leading `0x00` padding byte), the extra leading byte is dropped.
 5. If either is shorter than 32 bytes, it is left-padded with zero bytes to reach 32 bytes.
@@ -354,3 +354,76 @@ The most common scenario requiring all of these utilities together is verifying 
 <Tip>
   All five utilities are pure, synchronous functions with no native bridge calls. They run entirely in JavaScript and impose no performance overhead beyond the raw byte operations shown above.
 </Tip>
+
+---
+
+## Exported Algorithm Constants
+
+The package also exports several WebCrypto algorithm descriptor constants and format strings directly from `@perfood/capacitor-crypto-api`. Using these constants keeps your code in sync with the exact algorithms the plugin uses internally and eliminates hard-coded string literals.
+
+```typescript
+import {
+  CRYPTO_API_ECDSA_KEY_ALGORITHM,
+  CRYPTO_API_ECDSA_SIGN_ALGORITHM,
+  CRYPTO_API_ECDH_KEY_ALGORITHM,
+  CRYPTO_API_ECDH_ALGORITHM,
+  CRYPTO_API_AES_GCM_ALGORITHM,
+  PRIVATE_KEY_FORMAT,
+  PUBLIC_KEY_FORMAT,
+  SECRET_KEY_LENGHT,
+  IV_LENGTH,
+} from '@perfood/capacitor-crypto-api';
+```
+
+<Note>
+  `SECRET_KEY_LENGHT` is exported with that exact spelling (matching the source) — note the missing `h`. Use the import name as shown above.
+</Note>
+
+| Constant | Value | Description |
+|---|---|---|
+| `CRYPTO_API_ECDSA_KEY_ALGORITHM` | `{ name: 'ECDSA', namedCurve: 'P-256' }` | WebCrypto algorithm descriptor for importing or generating ECDSA P-256 keys. |
+| `CRYPTO_API_ECDSA_SIGN_ALGORITHM` | `{ name: 'ECDSA', hash: { name: 'SHA-256' } }` | WebCrypto algorithm descriptor for ECDSA signing and verification with SHA-256. |
+| `CRYPTO_API_ECDH_KEY_ALGORITHM` | `{ name: 'ECDH', namedCurve: 'P-256' }` | WebCrypto algorithm descriptor for importing or generating ECDH P-256 keys. |
+| `CRYPTO_API_ECDH_ALGORITHM` | `'ECDH'` | Algorithm name string for ECDH key derivation. |
+| `CRYPTO_API_AES_GCM_ALGORITHM` | `'AES-GCM'` | Algorithm name string for AES-GCM symmetric encryption (used by `encrypt`/`decrypt`). |
+| `PRIVATE_KEY_FORMAT` | `'pkcs8'` | WebCrypto key format for importing or exporting private keys. |
+| `PUBLIC_KEY_FORMAT` | `'spki'` | WebCrypto key format for importing or exporting public keys. |
+| `SECRET_KEY_LENGHT` | `256` | AES-GCM secret key length in bits derived during ECDH key agreement. |
+| `IV_LENGTH` | `12` | AES-GCM initialisation vector length in bytes (96 bits). Matches the `iv` field length returned by `encrypt`. |
+
+### Usage Example
+
+```typescript
+import {
+  CryptoApi,
+  base64ToArrayBuffer,
+  CRYPTO_API_ECDSA_KEY_ALGORITHM,
+  CRYPTO_API_ECDSA_SIGN_ALGORITHM,
+  PUBLIC_KEY_FORMAT,
+} from '@perfood/capacitor-crypto-api';
+
+// Load the plugin-generated public key and import it into WebCrypto
+// using the exact same algorithm descriptor the plugin uses internally.
+const { publicKey } = await CryptoApi.loadKey({
+  tag: 'com.example.app.authKey',
+  algorithm: 'ecdsa',
+});
+
+const keyBytes = base64ToArrayBuffer(publicKey!);
+
+const cryptoKey = await crypto.subtle.importKey(
+  PUBLIC_KEY_FORMAT,                // 'spki'
+  keyBytes.buffer,
+  CRYPTO_API_ECDSA_KEY_ALGORITHM,   // { name: 'ECDSA', namedCurve: 'P-256' }
+  true,
+  ['verify'],
+);
+
+// Verify using the matching sign algorithm descriptor.
+const isValid = await crypto.subtle.verify(
+  CRYPTO_API_ECDSA_SIGN_ALGORITHM,  // { name: 'ECDSA', hash: { name: 'SHA-256' } }
+  cryptoKey,
+  signatureBuffer,
+  dataBuffer,
+);
+```

@@ -1,7 +1,7 @@
 ---
-title: "Cryptographic Authentication with ECDSA Signing"
+title: "Hardware-Backed Cryptographic Authentication with ECDSA"
 sidebarTitle: "ECDSA Auth"
-description: "Build hardware-backed challenge-response authentication: generate an ECDSA key pair, register the public key on a server, request a challenge, sign it, and verify the signature."
+description: "Build challenge-response authentication with ECDSA: generate a key pair, register the public key, request a challenge, sign it, and verify the signature."
 ---
 
 Cryptographic authentication with ECDSA lets your app prove user identity without ever transmitting a password. The private key is generated once inside the device's secure hardware — the iOS Secure Enclave or Android StrongBox/TEE — and never leaves it. The server stores only the corresponding public key and can verify any signature the device produces, making key exfiltration attacks impossible even if the device is compromised at the OS level.

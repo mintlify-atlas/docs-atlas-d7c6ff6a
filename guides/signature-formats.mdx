@@ -1,7 +1,7 @@
 ---
 title: "Converting Between DER and P1363 Signature Formats"
 sidebarTitle: "Signature Formats"
-description: "Understand why iOS Secure Enclave and Android StrongBox return ASN.1 DER signatures while WebCrypto uses P1363, and how to convert between them with p1363ToDer and derToP1363."
+description: "Why native platforms return ASN.1 DER signatures while WebCrypto uses P1363, and how to convert between them with the p1363ToDer and derToP1363 utilities."
 ---
 
 ECDSA signatures can be encoded in two incompatible binary formats. iOS Secure Enclave and Android StrongBox/TEE produce signatures in **ASN.1 DER** format, while the browser's WebCrypto API (`SubtleCrypto.sign`) produces **IEEE P1363** (raw) format. Both are returned by the plugin as base64 strings, but a signature in one format will fail verification if the verifier expects the other. The `p1363ToDer` and `derToP1363` utilities let you convert between them without leaving JavaScript.
@@ -21,7 +21,7 @@ ECDSA signatures can be encoded in two incompatible binary formats. iOS Secure E
 
 A DER-encoded P-256 ECDSA signature looks like this in hex:
 
-```
+```text
 30 <total-length>
   02 <r-length> <r-bytes...>
   02 <s-length> <s-bytes...>
@@ -33,7 +33,7 @@ The lengths are variable: if the most-significant bit of `r` or `s` is set (i.e.
 
 A P1363-encoded P-256 ECDSA signature is exactly 64 bytes:
 
-```
+```text
 <r: 32 bytes, big-endian, zero-padded> <s: 32 bytes, big-endian, zero-padded>
 ```
 
