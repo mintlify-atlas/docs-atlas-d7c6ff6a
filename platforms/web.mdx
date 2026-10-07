@@ -1,0 +1,288 @@
+---
+title: "Web Platform: WebCrypto API for Development"
+sidebarTitle: "Web"
+description: "The web implementation uses window.crypto.subtle and stores key pairs in localStorage under CryptoApiECDSA: and CryptoApiECDH: prefixes. Intended for development use only."
+---
+
+The web implementation of `@perfood/capacitor-crypto-api` provides a fully functional, API-compatible shim that runs in the browser without any native code. It uses the browser's built-in **`window.crypto.subtle`** (WebCrypto API) for all cryptographic operations and **`localStorage`** for key pair persistence. This allows you to develop and test your application in a browser or Capacitor web view before deploying to a real iOS or Android device.
+
+<Warning>
+  The web implementation is intended **for development and testing only**. `localStorage` is not a secure key store — private keys are written in plaintext to browser storage, accessible to any script running on the same origin. Never ship a production app that relies on web key storage for sensitive credentials.
+</Warning>
+
+## Requirements
+
+<CardGroup cols={2}>
+  <Card title="HTTPS required" icon="lock">
+    `window.crypto.subtle` is only available in [secure contexts](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts). Every crypto operation (`generateKey`, `sign`, `encrypt`, `decrypt`, `verify`) throws an error if the page is served over plain HTTP.
+  </Card>
+  <Card title="Modern browser" icon="globe">
+    Any browser that supports the WebCrypto API (Chrome 37+, Firefox 34+, Safari 11+, Edge 12+). The plugin uses `P-256 / ECDSA` and `P-256 / ECDH` key types.
+  </Card>
+</CardGroup>
+
+## Key storage in localStorage
+
+Key pairs are serialized as JSON objects and stored in `localStorage` using a prefixed key name:
+
+| Algorithm | `localStorage` key format   | Example                               |
+|-----------|-----------------------------|---------------------------------------|
+| `ecdsa`   | `CryptoApiECDSA:<tag>`      | `CryptoApiECDSA:com.example.auth-key` |
+| `ecdh`    | `CryptoApiECDH:<tag>`       | `CryptoApiECDH:com.example.ecdh-key`  |
+
+Each entry contains a JSON object with two base64-encoded fields:
+
+```json
+{
+  "privateKey": "<base64-encoded PKCS#8 private key>",
+  "publicKey":  "<base64-encoded SPKI public key>"
+}
+```
+
+Private keys are exported in `pkcs8` format and public keys in `spki` format using `crypto.subtle.exportKey`. Both are then base64-encoded with `arrayBufferToBase64` before being saved.
+
+`getECDSATags()` and `getECDHTags()` scan `localStorage` for keys that start with the respective prefix and return the tag portion (everything after the colon):
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const { tags } = await CryptoApi.getECDSATags();
+// returns all tags whose localStorage key starts with 'CryptoApiECDSA:'
+```
+
+## Key generation
+
+`generateKey` checks whether a key pair already exists for the given `tag` and `algorithm`. If so, it returns the stored public key immediately (idempotent). Otherwise it generates a new key pair with `crypto.subtle.generateKey`, exports both keys, and stores them in `localStorage`:
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// ECDSA key pair — generates if absent, loads if present
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.auth-key',
+  algorithm: 'ecdsa',
+});
+
+// ECDH key pair for key agreement / encryption
+const { publicKey: ecdhPublicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.ecdh-key',
+  algorithm: 'ecdh',
+});
+```
+
+The `type` (`BiometryType`) parameter is **accepted but ignored** on the web — there is no biometry hardware in the browser, so no access control is applied to any key.
+
+<Info>
+  Key generation uses `{ name: 'ECDSA', namedCurve: 'P-256' }` for ECDSA keys and `{ name: 'ECDH', namedCurve: 'P-256' }` for ECDH keys. Both use `extractable: true` so the private key can be exported for storage.
+</Info>
+
+## Signing and verification
+
+Signing uses `crypto.subtle.sign` with `{ name: 'ECDSA', hash: 'SHA-256' }`. The WebCrypto API produces signatures in **IEEE P1363 (raw)** format — 64 bytes for P-256. The web implementation converts this to **ASN.1 DER** format using `p1363ToDer` before returning, so the output is identical to what iOS and Android produce:
+
+```
+WebCrypto (P1363) ──p1363ToDer──► base64(DER) ← returned to caller
+```
+
+Verification goes in the opposite direction: the incoming base64-DER signature is converted back to P1363 with `derToP1363` before being passed to `crypto.subtle.verify`:
+
+```
+base64(DER) ──derToP1363──► P1363 ──► crypto.subtle.verify
+```
+
+This means the `signature` string returned by `sign` and accepted by `verify` is always in the same DER-over-base64 format across all three platforms.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Sign — returns DER base64 (same format as iOS/Android)
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.auth-key',
+  data: 'challenge-string',
+});
+
+// Verify — expects DER base64
+const { verified } = await CryptoApi.verify({
+  foreignPublicKey: publicKeyBase64,
+  data: 'challenge-string',
+  signature,
+});
+```
+
+<Note>
+  The `data` field is a plain string. On the web, it is encoded to bytes via `btoa(data)` before being passed to the crypto APIs. Keep this in mind if you are testing cross-platform signature verification: the string must be identical on all platforms.
+</Note>
+
+## Encryption and decryption
+
+The web implementation derives a shared secret with `crypto.subtle.deriveKey` using ECDH, then encrypts with `AES-GCM` (256-bit key, 12-byte random IV). This matches the iOS (`CryptoKit.AES.GCM`) and Android (`AES/GCM/NoPadding`) implementations:
+
+```typescript
+// Encrypt with your ECDH private key and the remote party's public key
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: 'com.example.ecdh-key',
+  foreignPublicKey: remotePublicKeyBase64,
+  plaintext: 'Hello from the browser!',
+});
+
+// Decrypt
+const { plaintext } = await CryptoApi.decrypt({
+  tag: 'com.example.ecdh-key',
+  foreignPublicKey: remotePublicKeyBase64,
+  iv,
+  ciphertext,
+});
+```
+
+<Tip>
+  Because the ECDH derivation and AES-GCM parameters are identical to the native implementations, you can encrypt data in the browser and decrypt it on iOS/Android (or vice versa), as long as both sides use the same key pair and foreign public key.
+</Tip>
+
+## Biometrics and hardware features
+
+All biometrics and hardware-detection methods return **stub values** on the web — there is no biometry hardware in a browser:
+
+| Method | Return value |
+|--------|-------------|
+| `isBiometricsEnabled(type)` | `{ isEnabled: false }` |
+| `getBiometricsStatus(type)` | `{ status: 'UNKNOWN' }` |
+| `getAvailableHardware()` | `{ hardware: [] }` |
+| `isDevicePasscodeSet()` | `{ isDevicePasscodeSet: false }` |
+| `hasSecureHardware()` | `{ hasSecureHardware: false }` |
+
+Use these stubs in your tests to guard platform-specific code paths:
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+import { Capacitor } from '@capacitor/core';
+
+// Only show biometry UI on native platforms
+if (Capacitor.isNativePlatform()) {
+  const { isEnabled } = await CryptoApi.isBiometricsEnabled({ type: 'BIOMETRY' });
+  if (isEnabled) {
+    // present biometric gate
+  }
+}
+```
+
+## Passkeys on the web
+
+The web implementation delegates `registerPasskey` and `authenticateWithPasskey` directly to the browser's **WebAuthn API** (`navigator.credentials.create` / `navigator.credentials.get`). The plugin handles the base64url ↔ `ArrayBuffer` conversions required by the `PublicKeyCredential` interface transparently:
+
+```typescript
+// Register — triggers browser WebAuthn dialog (e.g. Touch ID on macOS Safari)
+const result = await CryptoApi.registerPasskey({
+  challenge: serverChallenge,
+  rp: { id: window.location.hostname, name: 'My App' },
+  user: {
+    id: userId,
+    name: 'user@example.com',
+    displayName: 'Alice',
+  },
+  pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+  authenticatorSelection: {
+    residentKey: 'required',
+    userVerification: 'preferred',
+  },
+  extensions: { credProps: true },
+});
+
+// Authenticate
+const authResult = await CryptoApi.authenticateWithPasskey({
+  rpId: window.location.hostname,
+  challenge: serverChallenge,
+  allowCredentials: [{ type: 'public-key', id: credentialId }],
+  userVerification: 'required',
+});
+```
+
+## Utility functions
+
+The following utility functions are exported from `@perfood/capacitor-crypto-api` and are used internally by the web implementation. You can import and use them directly in your own code:
+
+<Accordion title="p1363ToDer(sig: Uint8Array): Uint8Array">
+Converts an IEEE P1363 (raw, concatenated r||s) ECDSA signature to ASN.1 DER format. Useful when you receive a WebCrypto signature and need to pass it to a native backend or library that expects DER.
+
+```typescript
+import { p1363ToDer, arrayBufferToBase64 } from '@perfood/capacitor-crypto-api';
+
+const rawSig = new Uint8Array(signatureArrayBuffer); // 64 bytes P1363
+const derSig = p1363ToDer(rawSig);
+const derBase64 = arrayBufferToBase64(derSig.buffer);
+```
+</Accordion>
+
+<Accordion title="derToP1363(sig: Uint8Array): Uint8Array">
+Converts an ASN.1 DER ECDSA signature to IEEE P1363 (raw) format. Useful when a native platform returns a DER signature and you need to pass it to `crypto.subtle.verify`.
+
+```typescript
+import { derToP1363, base64ToArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+const derBytes = base64ToArrayBuffer(derBase64Signature);
+const p1363Bytes = derToP1363(derBytes);
+```
+</Accordion>
+
+<Accordion title="base64ToArrayBuffer(base64: string): Uint8Array">
+Decodes a standard base64 string into a `Uint8Array`.
+
+```typescript
+import { base64ToArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+const bytes = base64ToArrayBuffer(base64String); // Uint8Array
+```
+</Accordion>
+
+<Accordion title="arrayBufferToBase64(buffer: ArrayBuffer): string">
+Encodes an `ArrayBuffer` or buffer-compatible value to a standard base64 string.
+
+```typescript
+import { arrayBufferToBase64 } from '@perfood/capacitor-crypto-api';
+
+const b64 = arrayBufferToBase64(myArrayBuffer); // string
+```
+</Accordion>
+
+<Accordion title="toArrayBuffer(data: Uint8Array): ArrayBuffer">
+Converts a `Uint8Array` to a plain `ArrayBuffer` (extracts the underlying buffer with offset/length correction).
+
+```typescript
+import { toArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+const buf: ArrayBuffer = toArrayBuffer(uint8Array);
+```
+</Accordion>
+
+## Managing keys in localStorage
+
+During development you can inspect and clear web keys directly in the browser DevTools console:
+
+```javascript
+// List all CryptoApi keys in localStorage
+Object.keys(localStorage)
+  .filter(k => k.startsWith('CryptoApiECDSA:') || k.startsWith('CryptoApiECDH:'))
+  .forEach(k => console.log(k));
+
+// Delete a specific key via the plugin
+await CryptoApi.deleteKey({ tag: 'com.example.auth-key', algorithm: 'ecdsa' });
+
+// Or delete directly
+localStorage.removeItem('CryptoApiECDSA:com.example.auth-key');
+```
+
+## Platform behaviour summary
+
+<CardGroup cols={2}>
+  <Card title="Key storage" icon="database">
+    `localStorage` with keys `CryptoApiECDSA:<tag>` and `CryptoApiECDH:<tag>`. Private keys are stored as base64-encoded PKCS#8. **Not secure for production.**
+  </Card>
+  <Card title="Signature format" icon="file-signature">
+    WebCrypto produces P1363; the plugin converts to DER via `p1363ToDer` before returning. Incoming DER signatures are converted to P1363 via `derToP1363` for `crypto.subtle.verify`.
+  </Card>
+  <Card title="HTTPS mandatory" icon="lock">
+    All crypto operations throw if `window.location.protocol !== 'https:'`. Use a local HTTPS dev server (e.g., Vite's `--https` flag or `mkcert`).
+  </Card>
+  <Card title="Biometrics" icon="fingerprint">
+    All biometric and hardware queries return stub values (`false`, `[]`, `'UNKNOWN'`). No user prompts are shown on the web.
+  </Card>
+</CardGroup>

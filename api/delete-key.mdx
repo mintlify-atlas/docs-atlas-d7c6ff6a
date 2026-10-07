@@ -1,0 +1,198 @@
+---
+title: "deleteKey — Remove a Key Pair from Secure Storage"
+sidebarTitle: "deleteKey"
+description: "Permanently delete a hardware-backed ECDSA or ECDH key pair from the Secure Enclave, StrongBox/TEE, or WebCrypto storage. This action is irreversible."
+---
+
+The `deleteKey` method permanently removes a key pair from the device's secure hardware storage. It targets the key identified by the combination of `tag` and `algorithm`, deleting both the private key (held inside the Secure Enclave or StrongBox/TEE) and the associated public key metadata. Once deleted, the key cannot be recovered — any data signed or encrypted with the private key can no longer be decrypted or verified using the same key. This operation is typically performed during user sign-out, account deletion, or key rotation workflows.
+
+## Signature
+
+```typescript
+CryptoApi.deleteKey(options: DeleteKeyOptions): Promise<void>
+```
+
+## Parameters
+
+<ParamField body="tag" type="string" required>
+  The unique string identifier of the key pair to delete. This must exactly
+  match the `tag` used when the key was created with `generateKey`.
+</ParamField>
+
+<ParamField body="algorithm" type="'ecdsa' | 'ecdh'" required>
+  The elliptic curve algorithm of the key pair to delete. ECDSA and ECDH keys
+  are stored independently; deleting one algorithm's key does not affect the
+  other, even when they share the same tag.
+
+  - `"ecdsa"` — Delete an ECDSA signing key pair.
+  - `"ecdh"` — Delete an ECDH key agreement key pair.
+</ParamField>
+
+## Response
+
+This method returns `Promise<void>`. It resolves when the key has been
+successfully removed from secure storage.
+
+<Warning>
+  Key deletion is **permanent and irreversible**. Once a key pair is deleted
+  there is no way to recover it or any data that was solely protected by it.
+  Before calling `deleteKey`, ensure that any data encrypted with the
+  corresponding ECDH key has been decrypted and stored elsewhere, or
+  intentionally discarded. Similarly, a server-side public key registration
+  associated with a deleted ECDSA key will become permanently unusable for
+  signature verification.
+</Warning>
+
+## Examples
+
+<Tabs>
+  <Tab title="Delete an ECDSA Key">
+    Remove an ECDSA signing key, for example during user sign-out or account
+    removal.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    await CryptoApi.deleteKey({
+      tag: 'com.myapp.user.auth',
+      algorithm: 'ecdsa',
+    });
+
+    console.log('ECDSA key pair deleted.');
+    ```
+  </Tab>
+  <Tab title="Delete an ECDH Key">
+    Remove an ECDH key pair when encrypted sessions are invalidated or a user
+    logs out.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    await CryptoApi.deleteKey({
+      tag: 'com.myapp.user.messaging',
+      algorithm: 'ecdh',
+    });
+
+    console.log('ECDH key pair deleted.');
+    ```
+  </Tab>
+  <Tab title="Safe Delete with Verification">
+    Confirm the key exists before deleting, and verify it is gone afterwards.
+    This pattern is useful in key rotation or cleanup workflows.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    const TAG = 'com.myapp.user.auth';
+
+    // Verify the key exists before attempting deletion
+    const { publicKey } = await CryptoApi.loadKey({
+      tag: TAG,
+      algorithm: 'ecdsa',
+    });
+
+    if (!publicKey) {
+      console.log('Key does not exist — nothing to delete.');
+    } else {
+      await CryptoApi.deleteKey({
+        tag: TAG,
+        algorithm: 'ecdsa',
+      });
+
+      // Confirm deletion
+      const { publicKey: afterDelete } = await CryptoApi.loadKey({
+        tag: TAG,
+        algorithm: 'ecdsa',
+      });
+
+      console.log('Key deleted:', afterDelete === undefined); // true
+    }
+    ```
+  </Tab>
+  <Tab title="Full Sign-Out Cleanup">
+    Delete all key material for a user during sign-out, covering both ECDSA
+    and ECDH key pairs.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    async function signOut(userTag: string): Promise<void> {
+      // Delete ECDSA signing key
+      await CryptoApi.deleteKey({
+        tag: userTag,
+        algorithm: 'ecdsa',
+      });
+
+      // Delete ECDH encryption key
+      await CryptoApi.deleteKey({
+        tag: userTag,
+        algorithm: 'ecdh',
+      });
+
+      console.log('All key material removed for user:', userTag);
+    }
+
+    await signOut('com.myapp.user.auth');
+    ```
+  </Tab>
+</Tabs>
+
+## Key rotation
+
+When rotating keys — for example, on a periodic schedule or after a suspected compromise — the recommended sequence is:
+
+<Steps>
+  <Step title="Generate the new key pair">
+    Call `generateKey` with a new tag (or the same tag, noting the overwrite
+    behaviour) to create fresh key material in secure hardware.
+
+    ```typescript
+    const { publicKey: newPublicKey } = await CryptoApi.generateKey({
+      tag: 'com.myapp.user.auth.v2',
+      algorithm: 'ecdsa',
+    });
+    ```
+  </Step>
+  <Step title="Register the new public key server-side">
+    Send the new public key to your backend and confirm the registration
+    before removing the old key.
+
+    ```typescript
+    await fetch('/api/rotate-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publicKey: newPublicKey }),
+    });
+    ```
+  </Step>
+  <Step title="Delete the old key pair">
+    Only after the new key is confirmed as registered, remove the old key
+    from secure hardware.
+
+    ```typescript
+    await CryptoApi.deleteKey({
+      tag: 'com.myapp.user.auth.v1',
+      algorithm: 'ecdsa',
+    });
+    ```
+  </Step>
+</Steps>
+
+## Platform behaviour
+
+<CardGroup cols={3}>
+  <Card title="iOS — Secure Enclave" icon="apple">
+    Removes the key entry from the Secure Enclave keychain. The private key
+    bytes are cryptographically erased by the hardware. The operation is silent
+    if the key does not exist.
+  </Card>
+  <Card title="Android — StrongBox / TEE" icon="android">
+    Deletes the key alias from the Android Keystore. The hardware-backed key
+    material is destroyed. Behaviour when the key does not exist varies by
+    device and Android version.
+  </Card>
+  <Card title="Web — WebCrypto API" icon="browser">
+    Removes the key entry from `localStorage`. No hardware-backed erasure
+    occurs. If the entry was already absent the operation completes silently.
+  </Card>
+</CardGroup>

@@ -1,0 +1,356 @@
+---
+title: "Utility Functions — Signature and Buffer Conversion Helpers"
+sidebarTitle: "Utilities"
+description: "Five exported helper functions for converting between DER and P1363 signature formats and encoding between base64 strings and binary ArrayBuffers."
+---
+
+All five utility functions are exported directly from `@perfood/capacitor-crypto-api` alongside the main plugin. They cover two common cross-platform pain points: converting ECDSA signatures between the raw IEEE P1363 format used by WebCrypto and the ASN.1 DER format expected by native iOS and Android implementations, and serialising binary data to and from base64 strings for transport over JSON APIs.
+
+## Import
+
+```typescript
+import {
+  p1363ToDer,
+  derToP1363,
+  base64ToArrayBuffer,
+  arrayBufferToBase64,
+  toArrayBuffer,
+} from '@perfood/capacitor-crypto-api';
+```
+
+---
+
+## Signature Format Conversion
+
+ECDSA signatures exist in two common binary encodings. Understanding the difference is essential when you need to verify a signature produced on one platform against a public key on another.
+
+<CardGroup cols={2}>
+  <Card title="IEEE P1363 (Raw)" icon="brackets-curly">
+    Used by the **WebCrypto API** (`SubtleCrypto.sign`). The signature is a fixed-length concatenation of two big-endian integers `r ∥ s`, each padded to the curve's coordinate size (32 bytes for P-256, giving a 64-byte signature).
+  </Card>
+  <Card title="ASN.1 DER" icon="code">
+    Used by **iOS Secure Enclave** and **Android Keystore**. The signature is a variable-length `SEQUENCE { INTEGER r, INTEGER s }` structure. Leading zero bytes are stripped from `r` and `s`, and an extra `0x00` prefix is added when the high bit is set to preserve the sign.
+  </Card>
+</CardGroup>
+
+<Note>
+  When the native platform (iOS/Android) signs data and you need to verify it with the WebCrypto API in a browser, call `derToP1363` to convert the signature first. For the reverse path — signing in the browser and verifying natively — call `p1363ToDer`.
+</Note>
+
+### `p1363ToDer`
+
+Converts a raw IEEE P1363 ECDSA signature (the format returned by `SubtleCrypto.sign`) into an ASN.1 DER-encoded signature (the format expected by iOS Secure Enclave and Android Keystore verification routines).
+
+**Conversion steps performed internally:**
+
+1. The 64-byte input is split into two 32-byte halves — `r` and `s`.
+2. Leading zero bytes are stripped from each integer.
+3. If the high bit of the first remaining byte is set, a `0x00` prefix is prepended to preserve the two's-complement sign.
+4. Each integer is wrapped in a DER `INTEGER` TLV (`02 <length> <value>`).
+5. The two `INTEGER` elements are wrapped in a DER `SEQUENCE` TLV (`30 <length> <r-tlv> <s-tlv>`).
+
+<ParamField path="sig" type="Uint8Array" required>
+  The raw P1363 signature bytes. For ECDSA over P-256 (the curve used by this plugin) this is exactly 64 bytes: the 32-byte `r` value followed by the 32-byte `s` value.
+</ParamField>
+
+<ResponseField name="return" type="Uint8Array">
+  The ASN.1 DER-encoded equivalent of the same signature. Length varies between 70 and 72 bytes for P-256 depending on whether padding is required for `r` and/or `s`.
+</ResponseField>
+
+```typescript
+import {
+  CryptoApi,
+  p1363ToDer,
+  base64ToArrayBuffer,
+  arrayBufferToBase64,
+} from '@perfood/capacitor-crypto-api';
+
+// Sign data with the WebCrypto API (P1363 output)
+const ecKey = await crypto.subtle.generateKey(
+  { name: 'ECDSA', namedCurve: 'P-256' },
+  false,
+  ['sign', 'verify'],
+);
+
+const data = new TextEncoder().encode('hello world');
+const rawSig = await crypto.subtle.sign(
+  { name: 'ECDSA', hash: 'SHA-256' },
+  ecKey.privateKey,
+  data,
+);
+
+// Convert P1363 → DER before sending to a native verifier
+const derSig = p1363ToDer(new Uint8Array(rawSig));
+const derSigBase64 = arrayBufferToBase64(derSig.buffer);
+```
+
+---
+
+### `derToP1363`
+
+Converts an ASN.1 DER-encoded ECDSA signature (the format produced by iOS Secure Enclave and Android Keystore) into a raw IEEE P1363 signature (the format expected by `SubtleCrypto.verify`).
+
+**Conversion steps performed internally:**
+
+1. The DER bytes are hex-encoded for parsing.
+2. The length of `r` is read from offset 3 of the hex string (`rLength`).
+3. `r` and `s` are extracted from their `INTEGER` TLV positions.
+4. If `r` or `s` is longer than 32 bytes (due to a leading `0x00` padding byte), the extra leading byte is dropped.
+5. If either is shorter than 32 bytes, it is left-padded with zero bytes to reach 32 bytes.
+6. The final P1363 signature is the concatenation `r ∥ s` (always 64 bytes for P-256).
+
+<ParamField path="sig" type="Uint8Array" required>
+  The ASN.1 DER-encoded ECDSA signature bytes, as returned by the native iOS or Android platform. Typically 70–72 bytes for P-256.
+</ParamField>
+
+<ResponseField name="return" type="Uint8Array">
+  The raw P1363 signature bytes — exactly 64 bytes for P-256. Suitable for direct use with `SubtleCrypto.verify`.
+</ResponseField>
+
+```typescript
+import {
+  CryptoApi,
+  derToP1363,
+  base64ToArrayBuffer,
+  toArrayBuffer,
+} from '@perfood/capacitor-crypto-api';
+
+// Sign on-device using the native ECDSA key
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.app.authKey',
+  data: challengeBase64,
+});
+
+// The native plugin returns the signature as a base64-encoded DER blob.
+// Convert it to P1363 before passing to SubtleCrypto.verify.
+const derBytes = base64ToArrayBuffer(signature!);
+const p1363Bytes = derToP1363(derBytes);
+
+const verified = await crypto.subtle.verify(
+  { name: 'ECDSA', hash: 'SHA-256' },
+  importedPublicKey,          // CryptoKey imported from the base64 public key
+  toArrayBuffer(p1363Bytes),  // ArrayBuffer required by SubtleCrypto
+  challengeBuffer,
+);
+```
+
+<Warning>
+  Both conversion functions throw `Error('Invalid signature')` if the computed hex string does not contain any valid two-character hex pairs. Always wrap calls in a `try/catch` when processing signatures from untrusted sources.
+</Warning>
+
+---
+
+## Buffer and Encoding Helpers
+
+### `base64ToArrayBuffer`
+
+Decodes a base64-encoded string into a `Uint8Array`. All binary values exchanged with the `CryptoApi` plugin (public keys, signatures, ciphertext, IV) are base64 strings at the JavaScript boundary; this function converts them to binary for use with WebCrypto APIs.
+
+Internally uses `atob` followed by a `charCodeAt` map, so it is synchronous and works in any browser or WKWebView context.
+
+<ParamField path="base64" type="string" required>
+  A valid base64-encoded string. Standard alphabet (`A–Z`, `a–z`, `0–9`, `+`, `/`) with optional `=` padding. URL-safe base64 (using `-` and `_`) is **not** supported.
+</ParamField>
+
+<ResponseField name="return" type="Uint8Array">
+  The decoded binary data as a `Uint8Array`.
+</ResponseField>
+
+```typescript
+import { base64ToArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+// Decode the plugin's base64 public key for import into WebCrypto
+const { publicKey } = await CryptoApi.loadKey({
+  tag: 'com.example.app.ecdhKey',
+  algorithm: 'ecdh',
+});
+
+const keyBytes: Uint8Array = base64ToArrayBuffer(publicKey!);
+
+// Import as a raw EC public key for use with SubtleCrypto
+const cryptoKey = await crypto.subtle.importKey(
+  'raw',
+  keyBytes.buffer,
+  { name: 'ECDH', namedCurve: 'P-256' },
+  true,
+  [],
+);
+```
+
+---
+
+### `arrayBufferToBase64`
+
+Encodes an `ArrayBuffer` (or any typed-array buffer) to a base64 string using the standard alphabet. Use this to produce the base64 strings expected by `CryptoApi` methods such as `sign`, `encrypt`, and `decrypt`.
+
+Internally spreads the buffer into a `Uint8Array` and uses `String.fromCharCode` with `btoa`, making it synchronous and suitable for all environments where `btoa` is available.
+
+<ParamField path="arrayBuffer" type="ArrayBuffer" required>
+  Any `ArrayBuffer`. If you have a `Uint8Array`, pass its `.buffer` property, or use `toArrayBuffer` first to obtain a clean copy.
+</ParamField>
+
+<ResponseField name="return" type="string">
+  The standard base64-encoded representation of the buffer contents.
+</ResponseField>
+
+```typescript
+import { arrayBufferToBase64, toArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+// Encode a challenge ArrayBuffer to base64 for CryptoApi.sign
+const challengeBytes = crypto.getRandomValues(new Uint8Array(32));
+const challengeBase64: string = arrayBufferToBase64(challengeBytes.buffer);
+
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.app.authKey',
+  data: challengeBase64,
+});
+```
+
+---
+
+### `toArrayBuffer`
+
+Copies the contents of a `Uint8Array` into a new, standalone `ArrayBuffer`. This is needed because a `Uint8Array` may be backed by a larger, shared buffer (with a non-zero `byteOffset`), while WebCrypto APIs such as `SubtleCrypto.verify` and `SubtleCrypto.importKey` require a plain `ArrayBuffer` that starts at offset 0.
+
+<ParamField path="data" type="Uint8Array" required>
+  Any `Uint8Array`. The function creates a new `ArrayBuffer` of length `data.byteLength` and copies the bytes into it.
+</ParamField>
+
+<ResponseField name="return" type="ArrayBuffer">
+  A new `ArrayBuffer` whose contents are an exact copy of `data`. Mutations to the returned buffer do not affect the original `Uint8Array`.
+</ResponseField>
+
+```typescript
+import {
+  CryptoApi,
+  derToP1363,
+  toArrayBuffer,
+  base64ToArrayBuffer,
+} from '@perfood/capacitor-crypto-api';
+
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.app.authKey',
+  data: challengeBase64,
+});
+
+const derBytes = base64ToArrayBuffer(signature!);
+const p1363Bytes = derToP1363(derBytes);
+
+// toArrayBuffer ensures a zero-offset ArrayBuffer for SubtleCrypto
+const sigBuffer: ArrayBuffer = toArrayBuffer(p1363Bytes);
+
+const isValid = await crypto.subtle.verify(
+  { name: 'ECDSA', hash: 'SHA-256' },
+  importedPublicKey,
+  sigBuffer,
+  challengeBuffer,
+);
+```
+
+---
+
+## End-to-End Cross-Platform Verification Example
+
+The most common scenario requiring all of these utilities together is verifying a native ECDSA signature in the browser, or verifying a WebCrypto signature on a native server.
+
+<Tabs>
+  <Tab title="Native → WebCrypto (browser verify)">
+    ```typescript
+    import {
+      CryptoApi,
+      base64ToArrayBuffer,
+      arrayBufferToBase64,
+      derToP1363,
+      toArrayBuffer,
+    } from '@perfood/capacitor-crypto-api';
+
+    // 1. Generate a challenge
+    const challengeBytes = crypto.getRandomValues(new Uint8Array(32));
+    const challengeBase64 = arrayBufferToBase64(challengeBytes.buffer);
+
+    // 2. Sign with the native key (returns DER-encoded base64)
+    const { signature } = await CryptoApi.sign({
+      tag: 'com.example.app.authKey',
+      data: challengeBase64,
+    });
+
+    // 3. Load the public key and decode from base64
+    const { publicKey } = await CryptoApi.loadKey({
+      tag: 'com.example.app.authKey',
+      algorithm: 'ecdsa',
+    });
+    const publicKeyBytes = base64ToArrayBuffer(publicKey!);
+
+    // 4. Import the public key into WebCrypto
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      publicKeyBytes.buffer,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify'],
+    );
+
+    // 5. Convert the DER signature to P1363 for SubtleCrypto
+    const derBytes = base64ToArrayBuffer(signature!);
+    const p1363Bytes = derToP1363(derBytes);
+
+    // 6. Verify in the browser
+    const verified = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      cryptoKey,
+      toArrayBuffer(p1363Bytes),
+      challengeBytes.buffer,
+    );
+
+    console.log('Signature valid:', verified);
+    ```
+  </Tab>
+  <Tab title="WebCrypto → Native (plugin verify)">
+    ```typescript
+    import {
+      CryptoApi,
+      p1363ToDer,
+      base64ToArrayBuffer,
+      arrayBufferToBase64,
+      toArrayBuffer,
+    } from '@perfood/capacitor-crypto-api';
+
+    // 1. Generate an ephemeral ECDSA key pair in WebCrypto
+    const ecKey = await crypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      ['sign', 'verify'],
+    );
+
+    // 2. Export the raw public key to base64 for the plugin verifier
+    const rawPublicKey = await crypto.subtle.exportKey('raw', ecKey.publicKey);
+    const foreignPublicKey = arrayBufferToBase64(rawPublicKey);
+
+    // 3. Sign data with WebCrypto (returns P1363 format)
+    const data = new TextEncoder().encode('message to sign');
+    const p1363Sig = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      ecKey.privateKey,
+      data,
+    );
+
+    // 4. Convert P1363 → DER, then base64-encode for the plugin
+    const derSig = p1363ToDer(new Uint8Array(p1363Sig));
+    const signatureBase64 = arrayBufferToBase64(derSig.buffer);
+    const dataBase64 = arrayBufferToBase64(toArrayBuffer(data));
+
+    // 5. Verify using the plugin
+    const { verified } = await CryptoApi.verify({
+      foreignPublicKey,
+      data: dataBase64,
+      signature: signatureBase64,
+    });
+
+    console.log('Signature valid:', verified);
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  All five utilities are pure, synchronous functions with no native bridge calls. They run entirely in JavaScript and impose no performance overhead beyond the raw byte operations shown above.
+</Tip>

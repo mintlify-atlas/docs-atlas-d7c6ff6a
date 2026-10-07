@@ -1,0 +1,214 @@
+---
+title: "authenticateWithPasskey — Assert a Passkey Authentication"
+sidebarTitle: "authenticateWithPasskey"
+description: "Authenticate a user with a previously registered WebAuthn passkey using CryptoApi.authenticateWithPasskey on iOS, Android, and Web platforms."
+---
+
+`CryptoApi.authenticateWithPasskey` performs the WebAuthn **authentication ceremony** — it produces a signed assertion that proves the user possesses the private key associated with a previously registered passkey credential. On iOS the assertion is signed by the Secure Enclave; on Android by StrongBox or TEE; on Web the call delegates to `navigator.credentials.get` via the WebAuthn API.
+
+The options mirror [WebAuthn `PublicKeyCredentialRequestOptions`](https://www.w3.org/TR/webauthn-2/#dictionary-assertion-options), making it straightforward to pass a server-issued challenge through to the authenticator with minimal transformation.
+
+---
+
+## Method Signature
+
+```typescript
+CryptoApi.authenticateWithPasskey(
+  options: AuthenticateWithPasskeyOptions
+): Promise<AuthenticateWithPasskeyResult>
+```
+
+---
+
+## Parameters
+
+<ParamField body="challenge" type="string" required>
+  A one-time, server-generated random value used to prevent replay attacks. Must be provided as a **base64url**-encoded string. The authenticator signs this challenge so the server can verify the assertion is fresh and originated from the expected session.
+</ParamField>
+
+<ParamField body="rpId" type="string" required>
+  The Relying Party ID — the domain that owns the credential (e.g. `"example.com"`). Must match the `rp.id` used during the original `registerPasskey` call. The platform will reject the assertion if the IDs do not match.
+</ParamField>
+
+<ParamField body="allowCredentials" type="Credential[]">
+  An optional list of acceptable credentials. When provided, the authenticator will only produce an assertion for one of the listed credentials. When omitted or empty, the authenticator presents all discoverable credentials registered for the relying party (usernameless login).
+
+  <Expandable title="Credential shape">
+    <ParamField body="type" type="'public-key'" required>
+      Must always be `'public-key'`.
+    </ParamField>
+
+    <ParamField body="id" type="string" required>
+      The credential ID as a **base64url**-encoded string. This is the `id` (or `rawId`) value returned by `registerPasskey`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="userVerification" type="'required'" required>
+  Controls whether the authenticator must verify the user's identity (biometric or PIN). `'required'` means the assertion will fail if the authenticator cannot perform user verification — the device will prompt the user for biometric or passcode confirmation.
+</ParamField>
+
+---
+
+## Response
+
+<ResponseField name="id" type="string">
+  The credential ID that produced the assertion, encoded as a **base64url** string. Use this to look up the stored public key on your server.
+</ResponseField>
+
+<ResponseField name="rawId" type="string">
+  The raw credential ID as a **base64url**-encoded string. Identical to `id` for most authenticators; included per the WebAuthn specification.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Always `"public-key"` per the WebAuthn specification.
+</ResponseField>
+
+<ResponseField name="response" type="object">
+  The authenticator assertion response containing the signed data.
+
+  <Expandable title="response fields">
+    <ResponseField name="response.authenticatorData" type="string">
+      A **base64url**-encoded binary structure that encodes the Relying Party ID hash, flags (user presence, user verification, and backup state), sign count, and any extension outputs. The server must verify the RP ID hash and check that the UP flag is set.
+    </ResponseField>
+
+    <ResponseField name="response.clientDataJSON" type="string">
+      A **base64url**-encoded JSON object containing the challenge, origin, and type (`"webauthn.get"`). The server must parse this and verify that the challenge matches the one it issued, and that the origin matches the expected origin.
+    </ResponseField>
+
+    <ResponseField name="response.signature" type="string">
+      A **base64url**-encoded DER-encoded ECDSA signature over the concatenation of `authenticatorData` and the SHA-256 hash of `clientDataJSON`. The server verifies this signature using the stored public key.
+    </ResponseField>
+
+    <ResponseField name="response.userHandle" type="string | undefined">
+      An optional **base64url**-encoded user handle (the `user.id` provided during registration). Present when the credential is a discoverable (resident) credential. Use this to identify the user server-side without requiring a prior username input.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="authenticatorAttachment" type="string | undefined">
+  How the authenticator is attached to the client device — typically `"platform"` for built-in authenticators or `"cross-platform"` for roaming keys. May be `undefined` on platforms that do not surface this value.
+</ResponseField>
+
+---
+
+## Platform Notes
+
+<Tabs>
+  <Tab title="iOS">
+    Uses `ASAuthorizationPlatformPublicKeyCredentialProvider.createCredentialAssertionRequest`. The assertion is performed by the Secure Enclave; the user is presented with a Face ID, Touch ID, or passcode prompt. Requires an associated domains entitlement (`webcredentials:<rpId>`) matching the `rpId` you provide.
+  </Tab>
+  <Tab title="Android">
+    Uses the Android Credential Manager `getCredential` API. Credentials synced to Google Password Manager are automatically discoverable. When `allowCredentials` is empty, the system displays a bottom sheet listing all passkeys registered for the `rpId`.
+  </Tab>
+  <Tab title="Web">
+    Delegates to `navigator.credentials.get({ publicKey: options })`. The `challenge` is decoded from base64url to `ArrayBuffer` and `allowCredentials[*].id` values are similarly decoded before the call. Requires a secure context (`https://` or `localhost`).
+  </Tab>
+</Tabs>
+
+---
+
+## TypeScript Example
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+import type {
+  AuthenticateWithPasskeyOptions,
+  AuthenticateWithPasskeyResult,
+  Credential,
+} from '@perfood/capacitor-crypto-api';
+
+/**
+ * Authenticates the user with a previously registered passkey.
+ *
+ * @param challenge     One-time base64url challenge from your backend.
+ * @param credentialIds Optional list of credential IDs to restrict the assertion.
+ *                      Omit to enable usernameless (discoverable credential) flow.
+ */
+async function authenticateUser(
+  challenge: string,
+  credentialIds?: string[],
+): Promise<AuthenticateWithPasskeyResult> {
+  const allowCredentials: Credential[] | undefined = credentialIds?.map((id) => ({
+    type: 'public-key' as const,
+    id,
+  }));
+
+  const options: AuthenticateWithPasskeyOptions = {
+    challenge,
+    rpId: 'example.com',
+    allowCredentials,       // Omit or pass [] for usernameless flow
+    userVerification: 'required', // Require biometric or PIN confirmation
+  };
+
+  const assertion = await CryptoApi.authenticateWithPasskey(options);
+
+  console.log('Authenticated credential ID:', assertion.id);
+
+  // If this was a discoverable credential, the user handle identifies the user.
+  if (assertion.response.userHandle) {
+    console.log('User handle (base64url):', assertion.response.userHandle);
+  }
+
+  // Forward the assertion to your server for verification.
+  return assertion;
+}
+
+// --- Full login flow (illustrative) ---
+async function login(username?: string): Promise<void> {
+  // 1. Request a challenge from your WebAuthn server.
+  // const { challenge, credentialIds } = await fetchAssertionChallenge(username);
+
+  // Simulated values for illustration:
+  const challenge = 'dGhpcyBpcyBhIHRlc3Q'; // base64url-encoded random bytes
+  const credentialIds = username
+    ? ['Y3JlZGVudGlhbElk'] // base64url credential IDs stored in your DB
+    : undefined;            // omit for usernameless flow
+
+  // 2. Perform the assertion on the device.
+  const assertion = await authenticateUser(challenge, credentialIds);
+
+  // 3. Send the assertion response to your server for verification.
+  // The server must:
+  //   a. Decode and verify clientDataJSON (challenge, origin, type).
+  //   b. Verify the RP ID hash in authenticatorData.
+  //   c. Verify the signature using the stored public key.
+  //   d. Check and update the sign counter to detect cloned authenticators.
+
+  // await verifyAssertionOnServer({
+  //   id: assertion.id,
+  //   rawId: assertion.rawId,
+  //   type: assertion.type,
+  //   response: assertion.response,
+  // });
+
+  console.log('Login successful for credential:', assertion.id);
+}
+```
+
+<Note>
+  When `allowCredentials` is empty or omitted, the system will show a credential picker listing **all** passkeys registered for the `rpId`. In this case `response.userHandle` in the result will contain the `user.id` from registration, which your server can use to identify the user without a prior username input.
+</Note>
+
+<Warning>
+  Always verify the assertion server-side — never trust a successful `authenticateWithPasskey` call alone as proof of authentication. Your server must check the challenge, origin, RP ID hash, user presence flag, and ECDSA signature to complete the ceremony correctly.
+</Warning>
+
+## Server-Side Verification Checklist
+
+After receiving the assertion result, your WebAuthn server library must perform the following steps as defined in the [WebAuthn Level 2 specification §7.2](https://www.w3.org/TR/webauthn-2/#sctn-verifying-assertion):
+
+<Steps>
+  <Step title="Decode clientDataJSON">
+    Base64url-decode `response.clientDataJSON` and parse the resulting JSON. Verify that `type` is `"webauthn.get"`, `challenge` matches the issued challenge, and `origin` matches your expected origin.
+  </Step>
+  <Step title="Verify authenticatorData">
+    Base64url-decode `response.authenticatorData`. Verify that the first 32 bytes (RP ID hash) match `SHA-256(rpId)`, and that the UP (User Present) bit is set in the flags byte.
+  </Step>
+  <Step title="Verify the signature">
+    Base64url-decode `response.signature`. Verify it is a valid ECDSA signature over `authenticatorData || SHA-256(clientDataJSON)` using the public key stored during registration.
+  </Step>
+  <Step title="Update the sign counter">
+    Compare the sign counter in `authenticatorData` with the stored value. If the received counter is not greater than the stored value, the authenticator may have been cloned — treat as an error.
+  </Step>
+</Steps>

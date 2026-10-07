@@ -1,0 +1,256 @@
+---
+title: "encrypt — AES-GCM Encrypt Using ECDH Key Agreement"
+sidebarTitle: "encrypt"
+description: "Encrypt plaintext with AES-256-GCM via ECDH key agreement using a hardware-backed key and a recipient's public key. Returns base64 IV and ciphertext."
+---
+
+The `encrypt` method performs authenticated encryption using **AES-256-GCM**, where the symmetric key is never stored or transmitted — it is freshly derived each time through an **Elliptic Curve Diffie-Hellman (ECDH)** key agreement. You provide the tag of your ECDH private key (held in secure hardware) and the recipient's ECDH public key; the plugin computes the shared secret, derives a 256-bit AES-GCM key, generates a random 12-byte initialization vector (IV), and encrypts your plaintext. The IV and ciphertext are returned as base64 strings and must both be sent to the decrypting party alongside your public key.
+
+## Signature
+
+```typescript
+CryptoApi.encrypt(options: EncryptOptions): Promise<EncryptResponse>
+```
+
+## How ECDH key agreement works
+
+<Steps>
+  <Step title="ECDH shared secret">
+    The plugin combines your **local ECDH private key** (stored in secure
+    hardware, never exported) with the **foreign ECDH public key** you supply to
+    derive a deterministic shared secret using the P-256 curve. Both parties
+    compute the same secret independently.
+  </Step>
+  <Step title="AES-256-GCM key derivation">
+    The shared secret is used directly as a 256-bit AES-GCM key
+    (`SECRET_KEY_LENGTH = 256`). No additional KDF step is applied.
+  </Step>
+  <Step title="Random IV generation">
+    A cryptographically random 12-byte (96-bit) IV is generated for each
+    encryption call (`IV_LENGTH = 12`). Never reuse an IV with the same key.
+  </Step>
+  <Step title="Authenticated encryption">
+    AES-GCM encrypts the plaintext and produces a ciphertext that includes a
+    16-byte authentication tag. Tampering with the ciphertext or IV will cause
+    decryption to fail.
+  </Step>
+</Steps>
+
+## Parameters
+
+<ParamField body="tag" type="string" required>
+  The unique tag identifying your **ECDH** key pair in secure hardware. The key
+  must have been created with [`generateKey`](/api/generate-key) using
+  `algorithm: 'ecdh'`. Do not use an ECDSA tag here — they are stored
+  separately.
+</ParamField>
+
+<ParamField body="foreignPublicKey" type="string" required>
+  The recipient's ECDH public key as a **base64** string in **SPKI** format.
+  This is the `publicKey` value returned by `generateKey` or `loadKey` when
+  called on the recipient's device. The plugin uses this key in the ECDH key
+  agreement to derive the shared AES-GCM key.
+</ParamField>
+
+<ParamField body="plaintext" type="string" required>
+  The UTF-8 string to encrypt. There is no inherent size limit imposed by the
+  plugin, but very large payloads will consume more memory during the
+  encryption operation.
+</ParamField>
+
+<ParamField body="type" type="BiometryType">
+  Optional biometry prompt required to unlock the private key if it was
+  generated with biometric protection. Accepted values:
+
+  | Value | Description |
+  |---|---|
+  | `'BIOMETRY'` | Require biometric authentication (Face ID, Touch ID, fingerprint) |
+  | `'BIOMETRY_OR_PASSCODE'` | Biometrics with device passcode as fallback |
+  | `'PASSCODE'` | Device passcode only |
+
+  Omit this field when the key was generated without biometric protection.
+</ParamField>
+
+## Return value
+
+<ResponseField name="iv" type="string">
+  The randomly generated **initialization vector** encoded as a **base64**
+  string. This is a 12-byte (96-bit) value that must be stored and passed to
+  [`decrypt`](/api/decrypt) together with the ciphertext. The IV is not secret —
+  it is safe to transmit alongside the ciphertext.
+</ResponseField>
+
+<ResponseField name="ciphertext" type="string">
+  The AES-256-GCM encrypted output encoded as a **base64** string. The bytes
+  include both the encrypted plaintext and a 16-byte GCM authentication tag
+  appended at the end. Both `iv` and `ciphertext` are required for decryption.
+</ResponseField>
+
+<Note>
+  The IV is generated fresh on every call to `encrypt`. Store it alongside the
+  ciphertext — without the original IV, decryption is impossible.
+</Note>
+
+<Warning>
+  The `tag` parameter must refer to an **ECDH** key pair, not an ECDSA key
+  pair. Using an ECDSA tag will throw an error because ECDSA keys cannot be
+  used for key derivation.
+</Warning>
+
+<Tip>
+  For end-to-end encryption between two devices, each device generates its own
+  ECDH key pair, exchanges public keys, then uses the other party's public key
+  as `foreignPublicKey`. The ECDH shared secret is the same on both sides,
+  enabling symmetric encryption without transmitting the key.
+</Tip>
+
+## Platform behaviour
+
+<Tabs>
+  <Tab title="iOS">
+    ECDH key agreement is performed inside the **Secure Enclave**. The private
+    key never leaves the hardware boundary. AES-GCM encryption is performed in
+    software using the derived shared secret.
+  </Tab>
+  <Tab title="Android">
+    ECDH key agreement is performed inside **StrongBox** or the **TEE**. The
+    private key is non-exportable. AES-GCM encryption uses the Android platform
+    cryptography provider.
+  </Tab>
+  <Tab title="Web">
+    Uses `SubtleCrypto.deriveKey` with `{ name: 'ECDH' }` and
+    `SubtleCrypto.encrypt` with `{ name: 'AES-GCM', iv }`. The private key is
+    loaded from `localStorage` (PKCS#8 format). Biometry is not supported — the
+    `type` parameter is ignored. Only available in **secure contexts**
+    (`https://`).
+  </Tab>
+</Tabs>
+
+## Example
+
+### Basic encryption
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// 1. Generate an ECDH key pair on this device (sender)
+const { publicKey: senderPublicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.app.ecdh',
+  algorithm: 'ecdh',
+});
+
+// 2. Obtain the recipient's ECDH public key (e.g. from your server or the other device)
+const recipientPublicKey = 'MFkwEwYHKoZI...'; // base64 SPKI
+
+// 3. Encrypt the plaintext
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: 'com.example.app.ecdh',
+  foreignPublicKey: recipientPublicKey,
+  plaintext: 'Hello, secure world!',
+});
+
+console.log('IV (base64):', iv);
+console.log('Ciphertext (base64):', ciphertext);
+
+// 4. Send iv, ciphertext, and senderPublicKey to the recipient
+await fetch('/api/messages', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    senderPublicKey,
+    iv,
+    ciphertext,
+  }),
+});
+```
+
+### Encryption with biometric protection
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Generate an ECDH key pair secured by biometrics
+await CryptoApi.generateKey({
+  tag: 'com.example.app.secure-ecdh',
+  algorithm: 'ecdh',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+
+// Encrypt — biometric prompt will appear on iOS/Android
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: 'com.example.app.secure-ecdh',
+  foreignPublicKey: recipientPublicKey,
+  plaintext: 'Sensitive payload',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+```
+
+### Self-encryption (same key pair for both sides)
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// You can use the same device's own public key as the "foreign" key
+// for testing or local storage encryption
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.app.local-ecdh',
+  algorithm: 'ecdh',
+});
+
+// Encrypt using own public key as foreignPublicKey
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: 'com.example.app.local-ecdh',
+  foreignPublicKey: publicKey!,
+  plaintext: 'Local secret data',
+});
+
+// Decrypt using own tag and own public key
+const { plaintext } = await CryptoApi.decrypt({
+  tag: 'com.example.app.local-ecdh',
+  foreignPublicKey: publicKey!,
+  iv,
+  ciphertext,
+});
+
+console.log('Decrypted:', plaintext); // 'Local secret data'
+```
+
+## Error handling
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+try {
+  const { iv, ciphertext } = await CryptoApi.encrypt({
+    tag: 'com.example.app.ecdh',
+    foreignPublicKey: recipientPublicKey,
+    plaintext: 'Sensitive data',
+  });
+
+  console.log('Encrypted successfully:', { iv, ciphertext });
+} catch (error) {
+  // Common causes:
+  // - No ECDH key found for the given tag (call generateKey first)
+  // - foreignPublicKey is malformed or not a valid SPKI-encoded EC key
+  // - Biometric authentication cancelled or failed
+  // - Not running in a secure context (Web only)
+  console.error('Encryption failed:', error);
+}
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="decrypt" icon="lock-open" href="/api/decrypt">
+    Decrypt ciphertext produced by this method using ECDH key agreement.
+  </Card>
+  <Card title="generateKey" icon="key" href="/api/generate-key">
+    Generate the ECDH key pair required by `encrypt`.
+  </Card>
+  <Card title="loadKey" icon="folder-open" href="/api/load-key">
+    Retrieve an existing ECDH public key by tag.
+  </Card>
+  <Card title="sign" icon="pen-nib" href="/api/sign">
+    Sign data with an ECDSA key for authentication.
+  </Card>
+</CardGroup>

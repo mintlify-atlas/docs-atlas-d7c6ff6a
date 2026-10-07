@@ -1,0 +1,206 @@
+---
+title: "sign — ECDSA Sign Data with Secure Hardware Key"
+sidebarTitle: "sign"
+description: "Sign data using an ECDSA private key in the Secure Enclave (iOS), StrongBox/TEE (Android), or WebCrypto (Web). Returns a base64 ASN.1 DER signature."
+---
+
+The `sign` method performs an ECDSA digital signature operation using a private key that never leaves secure hardware. You identify the key by its `tag`, pass the raw data you want signed, and the plugin hashes it with SHA-256 internally before signing — you do **not** pre-hash the data yourself. The resulting signature is returned as a base64-encoded ASN.1 DER-formatted byte sequence.
+
+## Signature
+
+```typescript
+CryptoApi.sign(options: SignOptions): Promise<SignResponse>
+```
+
+## Parameters
+
+<ParamField body="tag" type="string" required>
+  The unique tag that identifies the ECDSA key pair stored in secure hardware.
+  The key must have been previously created with
+  [`generateKey`](/api/generate-key) using `algorithm: 'ecdsa'`.
+</ParamField>
+
+<ParamField body="data" type="string" required>
+  The raw data to sign as a plain string. The plugin applies SHA-256 hashing
+  internally — do **not** hash this value yourself before passing it. On Web,
+  the string is UTF-8 encoded and then base64-encoded before the signing
+  operation.
+</ParamField>
+
+<ParamField body="type" type="BiometryType">
+  Optional biometry prompt to unlock the private key if it was generated with
+  biometric protection. Accepted values:
+
+  | Value | Description |
+  |---|---|
+  | `'BIOMETRY'` | Require biometric authentication (Face ID, Touch ID, fingerprint) |
+  | `'BIOMETRY_OR_PASSCODE'` | Biometrics with device passcode as fallback |
+  | `'PASSCODE'` | Device passcode only |
+
+  Omit this field when the key was generated without biometric protection.
+</ParamField>
+
+## Return value
+
+<ResponseField name="signature" type="string">
+  The ECDSA signature encoded as a **base64** string. The bytes represent a
+  standard **ASN.1 DER** sequence (`SEQUENCE { INTEGER r, INTEGER s }`). Use
+  the [`p1363ToDer`](/api/utilities#p1363toder) and
+  [`derToP1363`](/api/utilities#dertop1363) utilities if you need to convert
+  between DER and IEEE P1363 (raw `r || s`) formats.
+
+  Returns `undefined` if the signing operation fails or the key is not found.
+</ResponseField>
+
+<Note>
+  The `data` parameter is **not** pre-hashed. The plugin runs SHA-256 on the
+  data before signing on all platforms. Hashing it yourself before calling
+  `sign` will produce an incorrect signature that won't verify against the
+  plain data.
+</Note>
+
+<Warning>
+  On Android, if the private key was generated with `type: 'BIOMETRY'`, calling
+  `sign` without a matching `type` will throw an error because the key requires
+  user authentication before use.
+</Warning>
+
+## Platform behaviour
+
+<Tabs>
+  <Tab title="iOS">
+    Uses the **Secure Enclave** (P-256 curve). The private key is hardware-bound
+    and non-exportable. When `type` is set, a biometric prompt is displayed
+    before the signing operation.
+  </Tab>
+  <Tab title="Android">
+    Uses **StrongBox** or the **Trusted Execution Environment (TEE)**. Key
+    operations are performed inside the secure hardware boundary. Biometric
+    authentication is enforced at the OS level when required.
+  </Tab>
+  <Tab title="Web">
+    Uses the browser's **WebCrypto API** (`SubtleCrypto.sign`). The private key
+    is stored in `localStorage` in PKCS#8 format (base64). Biometry is not
+    supported on Web — the `type` parameter is ignored. Only available in
+    **secure contexts** (`https://`).
+  </Tab>
+</Tabs>
+
+## Example
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// 1. Ensure an ECDSA key pair exists for this tag
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.app.auth',
+  algorithm: 'ecdsa',
+});
+
+// 2. Obtain a server-issued challenge (opaque string — not pre-hashed)
+const challenge = 'base64-encoded-server-challenge';
+
+// 3. Sign the challenge with the secure-hardware private key
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.app.auth',
+  data: challenge,
+});
+
+console.log('DER signature (base64):', signature);
+
+// 4. Send the signature to your server for verification
+await fetch('/api/verify', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ challenge, signature }),
+});
+```
+
+### With biometric protection
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Generate a biometrically protected ECDSA key
+await CryptoApi.generateKey({
+  tag: 'com.example.app.biometric-auth',
+  algorithm: 'ecdsa',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+
+// Sign — biometric prompt will appear on iOS/Android
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.app.biometric-auth',
+  data: 'server-issued-challenge',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+```
+
+### Converting between DER and P1363 formats
+
+```typescript
+import {
+  CryptoApi,
+  p1363ToDer,
+  derToP1363,
+  base64ToArrayBuffer,
+  arrayBufferToBase64,
+  toArrayBuffer,
+} from '@perfood/capacitor-crypto-api';
+
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.app.auth',
+  data: 'my-data',
+});
+
+// Convert DER → IEEE P1363 (raw r || s, 64 bytes for P-256)
+const derBytes = base64ToArrayBuffer(signature!);
+const p1363Bytes = derToP1363(derBytes);
+console.log('P1363 length:', p1363Bytes.length); // 64 bytes for P-256
+
+// Convert back to DER
+const backToDer = p1363ToDer(p1363Bytes);
+const backToBase64 = arrayBufferToBase64(toArrayBuffer(backToDer));
+```
+
+## Error handling
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+try {
+  const { signature } = await CryptoApi.sign({
+    tag: 'com.example.app.auth',
+    data: 'challenge-string',
+  });
+
+  if (!signature) {
+    throw new Error('Signing returned no signature');
+  }
+
+  console.log('Signature:', signature);
+} catch (error) {
+  // Common causes:
+  // - Key not found for the given tag (call generateKey first)
+  // - Biometric authentication cancelled by the user
+  // - Secure hardware temporarily unavailable
+  console.error('Sign failed:', error);
+}
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="verify" icon="shield-check" href="/api/verify">
+    Verify a DER-encoded ECDSA signature against a public key.
+  </Card>
+  <Card title="generateKey" icon="key" href="/api/generate-key">
+    Generate the ECDSA key pair used by `sign`.
+  </Card>
+  <Card title="loadKey" icon="folder-open" href="/api/load-key">
+    Retrieve the public key associated with a tag.
+  </Card>
+  <Card title="Utilities" icon="wrench" href="/api/utilities">
+    Convert between DER and P1363 signature formats.
+  </Card>
+</CardGroup>

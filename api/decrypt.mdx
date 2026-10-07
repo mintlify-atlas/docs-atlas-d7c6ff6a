@@ -1,0 +1,256 @@
+---
+title: "decrypt — AES-GCM Decrypt Using ECDH Key Agreement"
+sidebarTitle: "decrypt"
+description: "Decrypt AES-256-GCM ciphertext by re-deriving an ECDH shared secret from a hardware-backed ECDH key and the sender's public key. Returns the plaintext."
+---
+
+The `decrypt` method reverses an [`encrypt`](/api/encrypt) operation. It uses the same **ECDH key agreement** process to re-derive the shared AES-256-GCM key, then decrypts the ciphertext using the provided initialization vector. Because ECDH is symmetric — both parties independently compute the same shared secret — the decrypting device only needs its own ECDH private key (held in secure hardware) and the sender's public key to reconstruct the AES key. AES-GCM's built-in authentication tag also ensures that any ciphertext tampering is detected and causes decryption to fail.
+
+## Signature
+
+```typescript
+CryptoApi.decrypt(options: DecryptOptions): Promise<DecryptResponse>
+```
+
+## Parameters
+
+<ParamField body="tag" type="string" required>
+  The unique tag identifying your **ECDH** key pair in secure hardware. This
+  must be the same ECDH key whose public key was shared with the encrypting
+  party. Must have been created with [`generateKey`](/api/generate-key) using
+  `algorithm: 'ecdh'`.
+</ParamField>
+
+<ParamField body="foreignPublicKey" type="string" required>
+  The **sender's** ECDH public key as a **base64** SPKI-encoded string — the
+  `publicKey` value originally returned when the sender called
+  `generateKey` or `loadKey`. The plugin uses this alongside your local private
+  key to recompute the shared secret. This must be the same public key the
+  sender used as their "own" key during encryption.
+</ParamField>
+
+<ParamField body="iv" type="string" required>
+  The **initialization vector** that was returned by [`encrypt`](/api/encrypt),
+  as a **base64** string. The IV is 12 bytes (96 bits) and must exactly match
+  the value used during encryption. Providing a different IV will cause
+  decryption to fail with an authentication error.
+</ParamField>
+
+<ParamField body="ciphertext" type="string" required>
+  The encrypted payload returned by [`encrypt`](/api/encrypt), as a **base64**
+  string. The bytes include the encrypted plaintext followed by a 16-byte GCM
+  authentication tag. Ciphertext that has been modified in any way will be
+  rejected.
+</ParamField>
+
+<ParamField body="type" type="BiometryType">
+  Optional biometry prompt required to unlock the private key if it was
+  generated with biometric protection. Must match the `type` used during key
+  generation. Accepted values:
+
+  | Value | Description |
+  |---|---|
+  | `'BIOMETRY'` | Require biometric authentication (Face ID, Touch ID, fingerprint) |
+  | `'BIOMETRY_OR_PASSCODE'` | Biometrics with device passcode as fallback |
+  | `'PASSCODE'` | Device passcode only |
+
+  Omit this field when the key was generated without biometric protection.
+</ParamField>
+
+## Return value
+
+<ResponseField name="plaintext" type="string">
+  The decrypted UTF-8 string — the original value that was passed as `plaintext`
+  to [`encrypt`](/api/encrypt). Unlike `signature` in [`sign`](/api/sign), this
+  field is always present on success; the method throws rather than returning an
+  empty value on failure.
+</ResponseField>
+
+<Note>
+  The `iv` and `ciphertext` values must come from the **same** `encrypt` call.
+  Mixing IV and ciphertext from different operations will fail AES-GCM
+  authentication.
+</Note>
+
+<Warning>
+  AES-GCM decryption is **all-or-nothing**. If the ciphertext, IV, or
+  authentication tag has been altered in any way, decryption throws an error
+  rather than returning garbled output. Always wrap `decrypt` in a `try/catch`.
+</Warning>
+
+## Full round-trip example
+
+The most common pattern is for two devices to exchange their ECDH public keys, then use each other's public key as `foreignPublicKey` when encrypting and decrypting.
+
+<Steps>
+  <Step title="Each device generates an ECDH key pair">
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    // Device A
+    const { publicKey: publicKeyA } = await CryptoApi.generateKey({
+      tag: 'com.example.device-a.ecdh',
+      algorithm: 'ecdh',
+    });
+
+    // Device B (separate device or session)
+    const { publicKey: publicKeyB } = await CryptoApi.generateKey({
+      tag: 'com.example.device-b.ecdh',
+      algorithm: 'ecdh',
+    });
+
+    // Exchange public keys via your server or another channel
+    ```
+  </Step>
+  <Step title="Device A encrypts using Device B's public key">
+    ```typescript
+    // Device A encrypts — uses its own private key + Device B's public key
+    const { iv, ciphertext } = await CryptoApi.encrypt({
+      tag: 'com.example.device-a.ecdh',
+      foreignPublicKey: publicKeyB!, // recipient's public key
+      plaintext: 'Secret message from A to B',
+    });
+
+    // Send { iv, ciphertext, senderPublicKey: publicKeyA } to Device B
+    ```
+  </Step>
+  <Step title="Device B decrypts using Device A's public key">
+    ```typescript
+    // Device B decrypts — uses its own private key + Device A's public key
+    const { plaintext } = await CryptoApi.decrypt({
+      tag: 'com.example.device-b.ecdh',
+      foreignPublicKey: publicKeyA!, // sender's public key
+      iv,
+      ciphertext,
+    });
+
+    console.log('Decrypted message:', plaintext);
+    // → 'Secret message from A to B'
+    ```
+  </Step>
+</Steps>
+
+## Example: complete encrypt / decrypt in one session
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.app.ecdh';
+
+// Generate an ECDH key pair (or load existing one)
+const { publicKey } = await CryptoApi.generateKey({
+  tag: TAG,
+  algorithm: 'ecdh',
+});
+
+// ── Encrypt ──────────────────────────────────────────────────────────────────
+const originalText = 'Confidential payload';
+
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: TAG,
+  foreignPublicKey: publicKey!, // using own public key for self-encryption demo
+  plaintext: originalText,
+});
+
+console.log('IV:', iv);
+console.log('Ciphertext:', ciphertext);
+
+// ── Decrypt ──────────────────────────────────────────────────────────────────
+const { plaintext } = await CryptoApi.decrypt({
+  tag: TAG,
+  foreignPublicKey: publicKey!, // same public key used during encryption
+  iv,
+  ciphertext,
+});
+
+console.log('Plaintext:', plaintext);
+// → 'Confidential payload'
+console.log('Round-trip OK:', plaintext === originalText); // true
+```
+
+## Example: with biometric protection
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.app.secure-ecdh';
+
+// Key was generated with biometric protection:
+// await CryptoApi.generateKey({ tag: TAG, algorithm: 'ecdh', type: 'BIOMETRY' });
+
+// Decrypt — biometric prompt will appear on iOS/Android
+const { plaintext } = await CryptoApi.decrypt({
+  tag: TAG,
+  foreignPublicKey: senderPublicKey,
+  iv: receivedIv,
+  ciphertext: receivedCiphertext,
+  type: 'BIOMETRY',
+});
+
+console.log('Decrypted:', plaintext);
+```
+
+## Error handling
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+try {
+  const { plaintext } = await CryptoApi.decrypt({
+    tag: 'com.example.app.ecdh',
+    foreignPublicKey: senderPublicKey,
+    iv,
+    ciphertext,
+  });
+
+  console.log('Decrypted successfully:', plaintext);
+} catch (error) {
+  // Common causes:
+  // - No ECDH key found for the given tag (key was deleted or never created)
+  // - Wrong foreignPublicKey (shared secret will differ, GCM auth tag fails)
+  // - IV or ciphertext was modified or corrupted
+  // - Biometric authentication cancelled or failed
+  // - Not running in a secure context (Web only — requires https://)
+  console.error('Decryption failed:', error);
+}
+```
+
+## Platform behaviour
+
+<Tabs>
+  <Tab title="iOS">
+    ECDH key agreement runs inside the **Secure Enclave**. The private key is
+    hardware-bound and non-exportable. AES-GCM decryption is performed in
+    software using the derived shared secret.
+  </Tab>
+  <Tab title="Android">
+    ECDH key agreement runs inside **StrongBox** or the **TEE**. AES-GCM
+    decryption uses the Android platform cryptography provider. If the key
+    requires user authentication, a biometric prompt is shown before the key
+    agreement step.
+  </Tab>
+  <Tab title="Web">
+    Uses `SubtleCrypto.deriveKey` with `{ name: 'ECDH' }` and
+    `SubtleCrypto.decrypt` with `{ name: 'AES-GCM', iv }`. The private key is
+    loaded from `localStorage` (PKCS#8 format). Biometry is not supported — the
+    `type` parameter is ignored. Only available in **secure contexts**
+    (`https://`).
+  </Tab>
+</Tabs>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="encrypt" icon="lock" href="/api/encrypt">
+    Encrypt plaintext to produce the `iv` and `ciphertext` this method consumes.
+  </Card>
+  <Card title="generateKey" icon="key" href="/api/generate-key">
+    Generate the ECDH key pair required for decryption.
+  </Card>
+  <Card title="loadKey" icon="folder-open" href="/api/load-key">
+    Retrieve an existing ECDH public key by tag.
+  </Card>
+  <Card title="sign" icon="pen-nib" href="/api/sign">
+    Sign data with an ECDSA key for authentication alongside encryption.
+  </Card>
+</CardGroup>

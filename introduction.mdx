@@ -1,0 +1,85 @@
+---
+title: "Capacitor Crypto API: Hardware-Backed Cryptography"
+sidebarTitle: "Introduction"
+description: "A Capacitor plugin that leverages the Secure Enclave (iOS), StrongBox/TEE (Android), and WebCrypto (Web) for ECDSA signing, ECDH encryption, passkeys, and biometric-gated key access."
+---
+
+`@perfood/capacitor-crypto-api` is a Capacitor plugin that gives your cross-platform mobile app direct access to the device's secure hardware for cryptographic operations. On iOS it delegates to the **Secure Enclave**, on Android it uses **StrongBox** (falling back to the Trusted Execution Environment), and in the browser it uses the **WebCrypto API** so you can develop and test without a physical device. Private keys are generated inside the secure hardware and can never be extracted — they can only be used for signing or key-agreement operations, optionally gated behind biometric authentication.
+
+## Why hardware-backed cryptography?
+
+Software keystores can be extracted from a rooted or jailbroken device. Hardware keystores cannot — the private key material never leaves the secure chip. This makes the plugin suitable for:
+
+- **Cryptographic authentication** — sign server challenges with ECDSA instead of storing passwords
+- **End-to-end encryption** — derive shared AES-GCM keys via ECDH without transmitting secrets
+- **Passwordless login** — register and authenticate with WebAuthn/FIDO2 passkeys using native platform dialogs
+- **Biometric access control** — require Face ID, Touch ID, or Android BiometricPrompt before using a key
+
+## Platform support
+
+| Feature | iOS | Android | Web |
+|---|---|---|---|
+| Key generation | Secure Enclave (P-256) | StrongBox / TEE (P-256) | WebCrypto API |
+| ECDSA sign / verify | ✅ | ✅ | ✅ |
+| ECDH key agreement + AES-GCM | ✅ | ✅ | ✅ |
+| Private key extraction | ❌ Never | ❌ Never | ⚠️ Dev only |
+| Biometric key protection | Face ID / Touch ID | BiometricPrompt | ❌ |
+| Passkeys (WebAuthn) | iOS 16+ | Android 9+ | Browser |
+| Secure hardware detection | Always `true` | `hasSecureHardware()` | Always `false` |
+
+<Note>
+  The Web implementation stores key material in `localStorage` and is intended for **development and testing only**. Ship to real devices (iOS/Android) for production security guarantees. WebCrypto requires an HTTPS origin.
+</Note>
+
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="ECDSA — Sign & Verify" icon="pen-nib" href="/guides/ecdsa-authentication">
+    Generate P-256 key pairs in secure hardware. Sign arbitrary data with the hardware-bound private key and verify signatures against any ECDSA P-256 public key.
+  </Card>
+  <Card title="ECDH — Encrypt & Decrypt" icon="lock" href="/guides/ecdh-encryption">
+    Derive a shared AES-256-GCM secret from two ECDH P-256 public keys without ever exchanging the private key. Encrypt and decrypt messages end-to-end.
+  </Card>
+  <Card title="Passkeys (WebAuthn)" icon="fingerprint" href="/guides/passkeys">
+    Register and authenticate users with FIDO2 passkeys using native biometric dialogs — no passwords required. Supports resident keys and user verification.
+  </Card>
+  <Card title="Biometrics & Device Security" icon="shield-halved" href="/guides/biometrics">
+    Query biometric hardware availability, check enrollment status, detect secure hardware presence, and gate key operations behind biometric or passcode authentication.
+  </Card>
+</CardGroup>
+
+## Supported algorithms
+
+All platforms use **NIST P-256** (also called `secp256r1`) elliptic curve keys. The curve choice is enforced by the Secure Enclave on iOS and matches the WebCrypto and Android Keystore defaults.
+
+| Algorithm | Curve | Usage |
+|---|---|---|
+| ECDSA | P-256 / SHA-256 | Digital signatures |
+| ECDH | P-256 | Key agreement |
+| AES-GCM | 256-bit derived key | Symmetric encryption |
+
+## Signature format note
+
+The iOS Secure Enclave and Android StrongBox/TEE both return ECDSA signatures in **ASN.1 DER** format. The WebCrypto API uses **raw IEEE P1363** format. The plugin ships two utility functions — `p1363ToDer` and `derToP1363` — to convert between formats when interoperating with server-side libraries.
+
+```typescript
+import { p1363ToDer, derToP1363, base64ToArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+// Convert a raw WebCrypto signature to DER before sending to a server
+const rawSig = base64ToArrayBuffer(signature);
+const derSig = p1363ToDer(rawSig);
+```
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the package and run `npx cap sync` to link native modules.
+  </Card>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Generate a key, sign a challenge, and verify the signature in minutes.
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/generate-key">
+    Full TypeScript interface and parameter documentation.
+  </Card>
+</CardGroup>

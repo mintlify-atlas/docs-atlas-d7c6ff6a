@@ -1,0 +1,120 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Capacitor Crypto API",
+  "projectDescription": "A Capacitor plugin that provides a unified cryptographic API for secure key management and operations using platform-specific secure hardware: Secure Enclave on iOS, StrongBox/TEE on Android, and WebCrypto in the browser.",
+  "theme": "luma",
+  "primaryColor": "#0066cc",
+  "lightColor": "#097efc",
+  "darkColor": "#70b4fc",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/ecdsa-authentication",
+              "guides/ecdh-encryption",
+              "guides/passkeys",
+              "guides/biometrics",
+              "guides/signature-formats"
+            ]
+          },
+          {
+            "group": "Platform Support",
+            "pages": [
+              "platforms/ios",
+              "platforms/android",
+              "platforms/web"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Key Management",
+            "pages": [
+              "api/generate-key",
+              "api/load-key",
+              "api/delete-key",
+              "api/get-tags"
+            ]
+          },
+          {
+            "group": "Cryptographic Operations",
+            "pages": [
+              "api/sign",
+              "api/verify",
+              "api/encrypt",
+              "api/decrypt"
+            ]
+          },
+          {
+            "group": "Device & Biometrics",
+            "pages": [
+              "api/biometrics",
+              "api/device"
+            ]
+          },
+          {
+            "group": "Passkeys",
+            "pages": [
+              "api/register-passkey",
+              "api/authenticate-passkey"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/utilities"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Hardware-backed key generation using iOS Secure Enclave and Android StrongBox/TEE",
+    "ECDSA signing and verification with NIST P-256 elliptic curve keys",
+    "ECDH key agreement for deriving shared secrets and AES-GCM symmetric encryption",
+    "Biometric protection for private keys (Face ID, Touch ID, fingerprint)",
+    "Passkey (WebAuthn / FIDO2) registration and authentication",
+    "Web fallback using the browser WebCrypto API and localStorage",
+    "ASN.1 DER ↔ IEEE P1363 signature format conversion utilities",
+    "Cross-platform: iOS, Android, and Web (development) support"
+  ],
+  "publicApiSurface": [
+    "CryptoApi.generateKey(options: GenerateKeyOptions): Promise<GenerateKeyResponse>",
+    "CryptoApi.loadKey(options: LoadKeyOptions): Promise<LoadKeyResponse>",
+    "CryptoApi.deleteKey(options: DeleteKeyOptions): Promise<void>",
+    "CryptoApi.getECDSATags(): Promise<GetTagsResponse>",
+    "CryptoApi.getECDHTags(): Promise<GetTagsResponse>",
+    "CryptoApi.sign(options: SignOptions): Promise<SignResponse>",
+    "CryptoApi.verify(options: VerifyOptions): Promise<VerifyResponse>",
+    "CryptoApi.encrypt(options: EncryptOptions): Promise<EncryptResponse>",
+    "CryptoApi.decrypt(options: DecryptOptions): Promise<DecryptResponse>",
+    "CryptoApi.isBiometricsEnabled(options: BiometricsEnabledOptions): Promise<BiometricsEnabledResponse>",
+    "CryptoApi.getBiometricsStatus(options: BiometricsStatusOptions): Promise<BiometricsStatusResponse>",
+    "CryptoApi.getAvailableHardware(): Promise<AvailableHardwareResponse>",
+    "CryptoApi.isDevicePasscodeSet(): Promise<DevicePasscodeResponse>",
+    "CryptoApi.hasSecureHardware(): Promise<SecureHardwareResponse>",
+    "CryptoApi.registerPasskey(options: RegisterPasskeyOptions): Promise<RegisterPasskeyResult>",
+    "CryptoApi.authenticateWithPasskey(options: AuthenticateWithPasskeyOptions): Promise<AuthenticateWithPasskeyResult>",
+    "p1363ToDer(sig: Uint8Array): Uint8Array",
+    "derToP1363(sig: Uint8Array): Uint8Array",
+    "base64ToArrayBuffer(base64: string): Uint8Array",
+    "arrayBufferToBase64(arrayBuffer: ArrayBuffer): string",
+    "toArrayBuffer(data: Uint8Array): ArrayBuffer"
+  ]
+}

@@ -1,0 +1,230 @@
+---
+title: "registerPasskey — Create a WebAuthn Passkey Credential"
+sidebarTitle: "registerPasskey"
+description: "Create a hardware-backed WebAuthn passkey credential on iOS, Android, and Web using CryptoApi.registerPasskey with full parameter and response documentation."
+---
+
+`CryptoApi.registerPasskey` performs the WebAuthn **registration ceremony** — it creates a new public-key credential that is bound to the device's secure hardware and associates it with a relying party (your server). On iOS the credential is backed by the Secure Enclave; on Android it is backed by StrongBox or TEE; on Web it delegates to `navigator.credentials.create` via the WebAuthn API.
+
+The options you pass directly mirror the [WebAuthn `PublicKeyCredentialCreationOptions`](https://www.w3.org/TR/webauthn-2/#dictionary-makecredentialoptions) structure so they can be forwarded from a standard WebAuthn server challenge with minimal transformation.
+
+---
+
+## Method Signature
+
+```typescript
+CryptoApi.registerPasskey(options: RegisterPasskeyOptions): Promise<RegisterPasskeyResult>
+```
+
+---
+
+## Parameters
+
+<ParamField body="challenge" type="string" required>
+  A one-time, server-generated random value encoded as **base64url**. The authenticator signs this challenge during registration so the server can verify the ceremony was live and not replayed. Generate at least 16 bytes of random data server-side.
+</ParamField>
+
+<ParamField body="rp" type="object" required>
+  The Relying Party descriptor. Identifies your application to the authenticator.
+
+  <Expandable title="rp properties">
+    <ParamField body="rp.id" type="string" required>
+      The Relying Party ID — typically your domain name (e.g. `"example.com"`). Must be a registrable domain suffix of the origin from which the call is made.
+    </ParamField>
+
+    <ParamField body="rp.name" type="string" required>
+      A human-readable display name for your application (e.g. `"Example App"`). Shown in system UI prompts on some platforms.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="user" type="object" required>
+  Describes the account being registered.
+
+  <Expandable title="user properties">
+    <ParamField body="user.id" type="string" required>
+      A stable, unique identifier for the user account, encoded as **base64url**. Must not contain personally identifiable information. Used internally by the authenticator to manage resident keys.
+    </ParamField>
+
+    <ParamField body="user.name" type="string" required>
+      A human-readable identifier for the account, such as a username or email address (e.g. `"alice@example.com"`). Displayed in credential picker UI.
+    </ParamField>
+
+    <ParamField body="user.displayName" type="string" required>
+      A human-friendly display name for the account (e.g. `"Alice Smith"`). May be shown alongside `user.name` in authenticator UI.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="pubKeyCredParams" type="PublicKeyCredentialParameters[]" required>
+  An ordered list of acceptable public-key algorithms. The authenticator selects the first algorithm it supports.
+
+  <Expandable title="PublicKeyCredentialParameters shape">
+    <ParamField body="type" type="'public-key'" required>
+      Must always be `'public-key'`.
+    </ParamField>
+
+    <ParamField body="alg" type="-7" required>
+      The COSE algorithm identifier. `-7` corresponds to **ES256** (ECDSA over P-256 with SHA-256), which is the algorithm used by the Secure Enclave and Android StrongBox.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="authenticatorSelection" type="object" required>
+  Constraints on the authenticator that may be used to create the credential.
+
+  <Expandable title="authenticatorSelection properties">
+    <ParamField body="residentKey" type="'required'" required>
+      Requires the credential to be stored as a **discoverable credential** (resident key) on the authenticator. This enables usernameless login flows where the authenticator can present the credential without being told the credential ID.
+    </ParamField>
+
+    <ParamField body="userVerification" type="'preferred'" required>
+      Requests that the authenticator verify the user (e.g. via biometric or PIN). `'preferred'` means verification is requested but the ceremony will not fail if the authenticator does not support it.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="extensions" type="object">
+  WebAuthn extension inputs.
+
+  <Expandable title="extensions properties">
+    <ParamField body="credProps" type="boolean">
+      When `true`, requests the `credProps` extension output, which indicates whether the created credential is discoverable (`rk: true`). Useful for confirming resident-key creation.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+---
+
+## Response
+
+<ResponseField name="id" type="string">
+  The credential ID as a **base64url**-encoded string. Used to identify this credential in subsequent authentication ceremonies.
+</ResponseField>
+
+<ResponseField name="rawId" type="string">
+  The raw credential ID as a **base64url**-encoded string. Identical to `id` for most authenticators, but provided separately per the WebAuthn specification.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Always `"public-key"` per the WebAuthn specification.
+</ResponseField>
+
+<ResponseField name="response" type="object">
+  The authenticator's attestation response.
+
+  <Expandable title="response fields">
+    <ResponseField name="response.attestationObject" type="string">
+      A **base64url**-encoded CBOR-encoded attestation object. Contains the authenticator data (including the new public key and credential ID) and an optional attestation statement that allows the server to verify the authenticator's provenance.
+    </ResponseField>
+
+    <ResponseField name="response.clientDataJSON" type="string">
+      A **base64url**-encoded JSON string containing the client data: the challenge, origin, and type (`"webauthn.create"`). The server must verify this to prevent cross-origin and replay attacks.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="authenticatorAttachment" type="string | undefined">
+  Indicates how the authenticator is attached to the client. Common values are `"platform"` (built-in) or `"cross-platform"` (roaming). May be `undefined` on platforms that do not report this value.
+</ResponseField>
+
+---
+
+## Platform Notes
+
+<Tabs>
+  <Tab title="iOS">
+    Uses the native `ASAuthorizationPlatformPublicKeyCredentialProvider` API (iOS 16+). Credentials are stored in iCloud Keychain and backed by the Secure Enclave. Requires an associated domains entitlement (`webcredentials:<rpId>`) configured in your Xcode project.
+  </Tab>
+  <Tab title="Android">
+    Uses the Android Credential Manager API (API level 28+) with Passkeys backed by StrongBox or TEE. Credentials are synced to Google Password Manager when the user is signed in to a Google account. Requires Digital Asset Links verification (`/.well-known/assetlinks.json`) on your server.
+  </Tab>
+  <Tab title="Web">
+    Delegates directly to `navigator.credentials.create({ publicKey: options })`. The `challenge` and `user.id` fields are automatically decoded from base64url to `ArrayBuffer` before the call. Requires a secure context (`https://` or `localhost`).
+  </Tab>
+</Tabs>
+
+---
+
+## TypeScript Example
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+import type { RegisterPasskeyOptions, RegisterPasskeyResult } from '@perfood/capacitor-crypto-api';
+
+/**
+ * Registers a new passkey for the current user.
+ *
+ * @param userId   Stable base64url-encoded user identifier from your backend.
+ * @param challenge One-time base64url-encoded challenge from your backend.
+ */
+async function registerUserPasskey(
+  userId: string,
+  challenge: string,
+): Promise<RegisterPasskeyResult> {
+  const options: RegisterPasskeyOptions = {
+    challenge,
+    rp: {
+      id: 'example.com',
+      name: 'Example App',
+    },
+    user: {
+      id: userId,
+      name: 'alice@example.com',
+      displayName: 'Alice Smith',
+    },
+    pubKeyCredParams: [
+      {
+        type: 'public-key',
+        alg: -7, // ES256 — required by Secure Enclave and Android StrongBox
+      },
+    ],
+    authenticatorSelection: {
+      residentKey: 'required',        // Store as a discoverable credential
+      userVerification: 'preferred',  // Request biometric verification
+    },
+    extensions: {
+      credProps: true, // Request confirmation that credential is resident
+    },
+  };
+
+  const result = await CryptoApi.registerPasskey(options);
+
+  console.log('Credential ID:', result.id);
+  console.log('Authenticator attachment:', result.authenticatorAttachment);
+  // result.response.attestationObject and result.response.clientDataJSON
+  // should be forwarded to your server for verification.
+
+  return result;
+}
+
+// --- Server-side verification flow (illustrative) ---
+async function completeRegistration(
+  userId: string,
+  serverChallenge: string,
+): Promise<void> {
+  // 1. Obtain a challenge from your WebAuthn server.
+  // const { challenge } = await fetchChallengeFromServer(userId);
+
+  // 2. Register the passkey on the device.
+  const credential = await registerUserPasskey(userId, serverChallenge);
+
+  // 3. Send the attestation response to your server for verification.
+  // await sendAttestationToServer({
+  //   id: credential.id,
+  //   rawId: credential.rawId,
+  //   type: credential.type,
+  //   response: credential.response,
+  // });
+
+  console.log('Passkey registration complete:', credential.id);
+}
+```
+
+<Warning>
+  Never pass a static or predictable challenge. Always generate the challenge server-side using a cryptographically secure random number generator and associate it with the current session. Replay the challenge verification on the server after receiving the attestation response.
+</Warning>
+
+<Tip>
+  After successful registration, store the `credential.id` (or `rawId`) in your user database alongside the public key extracted from `response.attestationObject`. You will need the credential ID to populate the `allowCredentials` list in subsequent `authenticateWithPasskey` calls.
+</Tip>

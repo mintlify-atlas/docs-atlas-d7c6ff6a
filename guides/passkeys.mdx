@@ -1,0 +1,371 @@
+---
+title: "Passwordless Authentication with WebAuthn Passkeys"
+sidebarTitle: "Passkeys"
+description: "Register and authenticate users with hardware-backed passkeys using CryptoApi.registerPasskey and CryptoApi.authenticateWithPasskey — no passwords required."
+---
+
+Passkeys are phishing-resistant credentials built on the WebAuthn (FIDO2) standard. Instead of a password, the user's device generates a cryptographic key pair and stores the private key in secure hardware, protected by biometrics or device PIN. The plugin wraps the native passkey platform dialogs on iOS (Face ID / Touch ID) and Android (fingerprint / face unlock) and provides a compatible Web implementation via the browser's `navigator.credentials` API — so the same TypeScript code works across all three platforms.
+
+## Registration and authentication at a glance
+
+<CardGroup cols={2}>
+  <Card title="Registration" icon="id-card">
+    Your server generates a challenge and relying party info. The client calls `registerPasskey`, which shows the native biometrics prompt and returns an attestation object your server can verify.
+  </Card>
+  <Card title="Authentication" icon="right-to-bracket">
+    Your server generates a fresh challenge. The client calls `authenticateWithPasskey`, which shows the native dialog and returns a signed assertion your server verifies with the stored public key.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+```bash
+npm install @perfood/capacitor-crypto-api
+npx cap sync
+```
+
+Your server must implement the [WebAuthn server-side verification](https://w3c.github.io/webauthn/) spec (or use a library such as `@simplewebauthn/server` for Node.js).
+
+## Registration flow
+
+<Steps>
+
+### Fetch registration options from the server
+
+Your backend generates a `PublicKeyCredentialCreationOptions`-compatible object containing a random challenge, your relying party info, and user details. Fetch it and pass it directly to `registerPasskey`.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+import type { RegisterPasskeyOptions, RegisterPasskeyResult } from '@perfood/capacitor-crypto-api';
+
+async function fetchRegistrationOptions(userId: string): Promise<RegisterPasskeyOptions> {
+  const response = await fetch('https://api.example.com/passkey/register/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch registration options: ${response.statusText}`);
+  }
+
+  return response.json() as Promise<RegisterPasskeyOptions>;
+}
+```
+
+### Call `registerPasskey`
+
+Pass the options object to `CryptoApi.registerPasskey`. The plugin shows the native biometrics/platform dialog and, on success, returns a `RegisterPasskeyResult` containing the attestation object and `clientDataJSON` encoded as base64url strings.
+
+```typescript
+async function registerPasskey(userId: string): Promise<RegisterPasskeyResult> {
+  // Options from your server — example shape shown below
+  const options: RegisterPasskeyOptions = {
+    challenge: 'base64url-encoded-random-challenge-from-server',
+    rp: {
+      id: 'example.com',
+      name: 'Example App',
+    },
+    user: {
+      id: 'base64url-encoded-user-id',
+      name: 'user@example.com',
+      displayName: 'Alice Example',
+    },
+    pubKeyCredParams: [
+      { type: 'public-key', alg: -7 }, // ES256 (ECDSA with P-256 and SHA-256)
+    ],
+    authenticatorSelection: {
+      residentKey: 'required',
+      userVerification: 'preferred',
+    },
+    extensions: {
+      credProps: true,
+    },
+  };
+
+  const result = await CryptoApi.registerPasskey(options);
+  return result;
+}
+```
+
+<Note>
+  `alg: -7` is the COSE algorithm identifier for ES256 (ECDSA with P-256 and SHA-256). This is the only algorithm currently supported by the plugin.
+</Note>
+
+### Send the attestation to the server
+
+Forward the `RegisterPasskeyResult` to your backend. The server parses the `attestationObject` and `clientDataJSON`, verifies the challenge, and stores the `credentialId` (the `id` field) and the public key for future authentication.
+
+```typescript
+async function completeRegistration(
+  result: RegisterPasskeyResult,
+): Promise<void> {
+  const response = await fetch('https://api.example.com/passkey/register/finish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: result.id,
+      rawId: result.rawId,
+      type: result.type,
+      response: {
+        attestationObject: result.response.attestationObject,
+        clientDataJSON: result.response.clientDataJSON,
+      },
+      authenticatorAttachment: result.authenticatorAttachment,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Registration verification failed: ${response.statusText}`);
+  }
+}
+```
+
+</Steps>
+
+## Authentication flow
+
+<Steps>
+
+### Fetch authentication options from the server
+
+Your backend returns a fresh challenge and, optionally, a list of allowed credential IDs tied to the user's account.
+
+```typescript
+import type {
+  AuthenticateWithPasskeyOptions,
+  AuthenticateWithPasskeyResult,
+} from '@perfood/capacitor-crypto-api';
+
+async function fetchAuthOptions(userId: string): Promise<AuthenticateWithPasskeyOptions> {
+  const response = await fetch('https://api.example.com/passkey/auth/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch authentication options: ${response.statusText}`);
+  }
+
+  return response.json() as Promise<AuthenticateWithPasskeyOptions>;
+}
+```
+
+### Call `authenticateWithPasskey`
+
+Pass the authentication options to `CryptoApi.authenticateWithPasskey`. The plugin presents the native passkey selection and biometrics dialog. On success it returns a signed assertion.
+
+```typescript
+async function authenticateWithPasskey(userId: string): Promise<AuthenticateWithPasskeyResult> {
+  // Options from your server — example shape shown below
+  const options: AuthenticateWithPasskeyOptions = {
+    challenge: 'base64url-encoded-random-challenge-from-server',
+    rpId: 'example.com',
+    allowCredentials: [
+      {
+        type: 'public-key',
+        id: 'base64url-encoded-credential-id', // from registration
+      },
+    ],
+    userVerification: 'required',
+  };
+
+  const result = await CryptoApi.authenticateWithPasskey(options);
+  return result;
+}
+```
+
+<Note>
+  `allowCredentials` is optional. If omitted, the platform shows all passkeys registered for the relying party and lets the user choose. Providing credential IDs narrows the selection to a specific account.
+</Note>
+
+### Send the assertion to the server
+
+Forward the `AuthenticateWithPasskeyResult` to your backend. The server verifies the `signature` against the public key stored during registration and checks the challenge, origin, and counter values.
+
+```typescript
+async function completeAuthentication(
+  result: AuthenticateWithPasskeyResult,
+): Promise<boolean> {
+  const response = await fetch('https://api.example.com/passkey/auth/finish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: result.id,
+      rawId: result.rawId,
+      type: result.type,
+      response: {
+        authenticatorData: result.response.authenticatorData,
+        clientDataJSON: result.response.clientDataJSON,
+        signature: result.response.signature,
+        userHandle: result.response.userHandle,
+      },
+      authenticatorAttachment: result.authenticatorAttachment,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Authentication verification failed: ${response.statusText}`);
+  }
+
+  const { verified } = await response.json();
+  return verified as boolean;
+}
+```
+
+</Steps>
+
+## API reference
+
+### `RegisterPasskeyOptions`
+
+<ResponseField name="challenge" type="string" required>
+  A base64url-encoded random challenge generated by your server. Must be single-use.
+</ResponseField>
+
+<ResponseField name="rp" type="object" required>
+  Relying party information.
+  <Expandable title="rp properties">
+    <ResponseField name="id" type="string" required>
+      The relying party ID — must match your app's domain (e.g. `example.com`).
+    </ResponseField>
+    <ResponseField name="name" type="string" required>
+      Human-readable display name for your app (e.g. `"Example App"`).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="user" type="object" required>
+  User account information.
+  <Expandable title="user properties">
+    <ResponseField name="id" type="string" required>
+      Base64url-encoded user identifier. Must be unique per account.
+    </ResponseField>
+    <ResponseField name="name" type="string" required>
+      The user's account name (e.g. an email address).
+    </ResponseField>
+    <ResponseField name="displayName" type="string" required>
+      The user's display name shown in the native dialog.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="pubKeyCredParams" type="PublicKeyCredentialParameters[]" required>
+  Ordered list of acceptable algorithms. Currently only `{ type: 'public-key', alg: -7 }` (ES256) is supported.
+</ResponseField>
+
+<ResponseField name="authenticatorSelection" type="object" required>
+  <Expandable title="authenticatorSelection properties">
+    <ResponseField name="residentKey" type="'required'">
+      Must be `'required'` to create a discoverable credential (passkey).
+    </ResponseField>
+    <ResponseField name="userVerification" type="'preferred'">
+      Must be `'preferred'`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="extensions" type="object" required>
+  <Expandable title="extensions properties">
+    <ResponseField name="credProps" type="boolean">
+      Set to `true` to request credential properties extension data.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### `RegisterPasskeyResult`
+
+<ResponseField name="id" type="string">
+  The credential ID as a base64url string. Store this on your server to identify the credential in future authentication requests.
+</ResponseField>
+
+<ResponseField name="rawId" type="string">
+  The raw credential ID in base64url format.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Always `'public-key'`.
+</ResponseField>
+
+<ResponseField name="response" type="object">
+  <Expandable title="response properties">
+    <ResponseField name="attestationObject" type="string">
+      Base64url-encoded CBOR attestation object. Contains the public key and attestation statement.
+    </ResponseField>
+    <ResponseField name="clientDataJSON" type="string">
+      Base64url-encoded client data including the challenge and origin.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="authenticatorAttachment" type="string">
+  `'platform'` for device-bound authenticators (Face ID, Touch ID, fingerprint). May be `undefined` on some platforms.
+</ResponseField>
+
+### `AuthenticateWithPasskeyOptions`
+
+<ResponseField name="challenge" type="string" required>
+  A base64url-encoded random challenge from the server. Must be single-use.
+</ResponseField>
+
+<ResponseField name="rpId" type="string" required>
+  The relying party ID. Must match the `rp.id` used during registration.
+</ResponseField>
+
+<ResponseField name="allowCredentials" type="Credential[]">
+  Optional list of credential IDs to restrict which passkeys the authenticator considers. Each entry has `type: 'public-key'` and `id: string` (base64url).
+</ResponseField>
+
+<ResponseField name="userVerification" type="'required'" required>
+  Must be `'required'` to ensure the user is verified by biometrics or PIN.
+</ResponseField>
+
+### `AuthenticateWithPasskeyResult`
+
+<ResponseField name="id" type="string">
+  The credential ID that was used for authentication.
+</ResponseField>
+
+<ResponseField name="rawId" type="string">
+  The raw credential ID in base64url format.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Always `'public-key'`.
+</ResponseField>
+
+<ResponseField name="response" type="object">
+  <Expandable title="response properties">
+    <ResponseField name="authenticatorData" type="string">
+      Base64url-encoded authenticator data (RP ID hash, flags, counter).
+    </ResponseField>
+    <ResponseField name="clientDataJSON" type="string">
+      Base64url-encoded client data including the challenge, origin, and type.
+    </ResponseField>
+    <ResponseField name="signature" type="string">
+      Base64url-encoded ECDSA signature over the authenticator data and client data hash.
+    </ResponseField>
+    <ResponseField name="userHandle" type="string">
+      Optional base64url-encoded user handle (the `user.id` from registration).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="authenticatorAttachment" type="string">
+  `'platform'` for device-bound authenticators.
+</ResponseField>
+
+## Platform behaviour
+
+<Accordion title="iOS">
+  On iOS, the plugin delegates to the `ASAuthorization` framework. Face ID or Touch ID is used for user verification. Passkeys are synced to iCloud Keychain when iCloud is enabled, allowing cross-device login.
+</Accordion>
+
+<Accordion title="Android">
+  On Android, the plugin uses the Credential Manager API. Fingerprint, face unlock, or device PIN is used for verification. Passkeys can sync via Google Password Manager.
+</Accordion>
+
+<Accordion title="Web">
+  On the web, the plugin calls the browser's `navigator.credentials.create()` and `navigator.credentials.get()` APIs. Platform authenticators (Windows Hello, Touch ID in Safari, etc.) are used. Requires a secure context (`https://`).
+</Accordion>

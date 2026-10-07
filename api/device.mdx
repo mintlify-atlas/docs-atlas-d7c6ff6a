@@ -1,0 +1,135 @@
+---
+title: "Device Security API — Check Secure Hardware Availability"
+sidebarTitle: "Device"
+description: "Query whether a device has secure hardware (Secure Enclave / StrongBox) and whether a device passcode is configured using the Capacitor Crypto API."
+---
+
+The Device Security API exposes two lightweight methods that let your app confirm the hardware-security prerequisites before attempting any key generation or cryptographic operation. Checking these values up front lets you degrade gracefully on lower-security devices and provide clear user guidance when configuration is incomplete.
+
+<Note>
+  Both methods are synchronous checks that do **not** trigger any authentication UI. They are safe to call at any point in your app lifecycle, including on startup.
+</Note>
+
+---
+
+## `hasSecureHardware`
+
+```typescript
+CryptoApi.hasSecureHardware(): Promise<SecureHardwareResponse>
+```
+
+Returns whether the device has a hardware security module capable of storing private keys in an isolated, tamper-resistant enclave. Private keys generated via `CryptoApi.generateKey` are always stored inside this enclave and can never be extracted in plaintext.
+
+### Response
+
+<ResponseField name="hasSecureHardware" type="boolean">
+  `true` when a hardware security enclave is available.
+
+  <Expandable title="Platform-specific behavior">
+    **iOS** — Always returns `true`. Every iOS device that supports Capacitor has a Secure Enclave (A7 chip or later). The value is hard-coded to `true` on the iOS implementation.
+
+    **Android** — Returns `true` when a StrongBox-backed Keystore or a Trusted Execution Environment (TEE) is present and active. Entry-level or older Android devices that lack dedicated security hardware will return `false`.
+
+    **Web** — Always returns `false`. The Web implementation stores key material in `localStorage` via the WebCrypto API, which has no hardware enclave equivalent in the browser.
+  </Expandable>
+</ResponseField>
+
+---
+
+## `isDevicePasscodeSet`
+
+```typescript
+CryptoApi.isDevicePasscodeSet(): Promise<DevicePasscodeResponse>
+```
+
+Returns whether a device-level passcode (PIN, pattern, or password) is configured. A device passcode is a hard requirement for creating biometry-protected keys: the OS mandates a passcode fallback so the user can never be permanently locked out of their keys.
+
+### Response
+
+<ResponseField name="isDevicePasscodeSet" type="boolean">
+  `true` when a device PIN, pattern, or password lock is active.
+
+  <Expandable title="Platform-specific behavior">
+    **iOS** — Queries `LAContext.canEvaluatePolicy(.deviceOwnerAuthentication)` to determine whether a passcode is set.
+
+    **Android** — Delegates to `BiometryApi.isDevicePasscodeSet()`, which checks `KeyguardManager.isDeviceSecure()`.
+
+    **Web** — Always returns `false`. Browsers do not expose an API to interrogate OS-level screen lock state.
+  </Expandable>
+</ResponseField>
+
+---
+
+## Platform Summary
+
+| Method | iOS | Android | Web |
+|---|---|---|---|
+| `hasSecureHardware` | Always `true` (Secure Enclave) | `true` if StrongBox/TEE present | Always `false` |
+| `isDevicePasscodeSet` | `true` if screen lock passcode is set | `true` if device is secured | Always `false` |
+
+<Warning>
+  On Android, always verify `hasSecureHardware` before generating keys for high-security use cases. Devices without StrongBox still provide software-backed key storage, but the private key may be more vulnerable to extraction on a rooted device.
+</Warning>
+
+---
+
+## TypeScript Example
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+async function verifyDeviceSecurityPosture(): Promise<boolean> {
+  // Check for hardware security module.
+  const { hasSecureHardware } = await CryptoApi.hasSecureHardware();
+
+  if (!hasSecureHardware) {
+    console.warn(
+      'This device does not have a hardware security module. ' +
+      'Keys will be stored in software. Proceed with caution.'
+    );
+    // You may choose to block sensitive operations here or show an
+    // informational dialog explaining the reduced security level.
+  }
+
+  // Check that a device passcode / lock screen is configured.
+  const { isDevicePasscodeSet } = await CryptoApi.isDevicePasscodeSet();
+
+  if (!isDevicePasscodeSet) {
+    console.error(
+      'No device passcode is configured. ' +
+      'Biometry-protected key generation will fail.'
+    );
+    // Prompt the user to set a screen lock in device Settings before continuing.
+    return false;
+  }
+
+  console.log('Device security posture:', {
+    hasSecureHardware,
+    isDevicePasscodeSet,
+  });
+
+  return true;
+}
+
+async function initializeCrypto(): Promise<void> {
+  const isReady = await verifyDeviceSecurityPosture();
+
+  if (!isReady) {
+    // Surface an appropriate error to the user.
+    return;
+  }
+
+  // Safe to generate hardware-backed keys.
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: 'com.example.app.identity',
+    algorithm: 'ecdsa',
+    type: 'BIOMETRY_OR_PASSCODE',
+  });
+
+  console.log('Generated public key:', publicKey);
+}
+```
+
+<Tip>
+  Combine `hasSecureHardware` with `isBiometricsEnabled` (from the [Biometrics API](/api/biometrics)) to build a comprehensive security pre-flight that handles every combination of device capability.
+</Tip>

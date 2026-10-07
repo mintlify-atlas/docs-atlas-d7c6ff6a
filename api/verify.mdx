@@ -1,0 +1,204 @@
+---
+title: "verify — Verify an ECDSA Signature Against a Public Key"
+sidebarTitle: "verify"
+description: "Verify an ASN.1 DER ECDSA signature against a public key and signed data. Returns a boolean — true only if the signature is cryptographically valid."
+---
+
+The `verify` method checks that a given ECDSA signature was produced by the private key that corresponds to a supplied public key, over a specific piece of data. This is the counterpart to [`sign`](/api/sign) — you provide the signer's public key, the original unsigned data, and the DER-encoded signature, and the plugin tells you whether they match. Verification runs entirely on the local device without requiring access to secure hardware, because only the public key is needed.
+
+## Signature
+
+```typescript
+CryptoApi.verify(options: VerifyOptions): Promise<VerifyResponse>
+```
+
+## Parameters
+
+<ParamField body="foreignPublicKey" type="string" required>
+  The ECDSA public key of the party whose signature you want to verify, encoded
+  as a **base64** string in **SPKI** (SubjectPublicKeyInfo) DER format. This is
+  the same format returned by [`generateKey`](/api/generate-key) and
+  [`loadKey`](/api/load-key).
+</ParamField>
+
+<ParamField body="data" type="string" required>
+  The original data that was signed — the same string passed to
+  [`sign`](/api/sign). Do **not** hash this value; SHA-256 is applied
+  internally by the plugin before verification, mirroring how `sign` works.
+</ParamField>
+
+<ParamField body="signature" type="string" required>
+  The ECDSA signature to verify, encoded as a **base64** string. The bytes must
+  represent an **ASN.1 DER** sequence (`SEQUENCE { INTEGER r, INTEGER s }`).
+  This is the exact format produced by [`sign`](/api/sign). If your signature is
+  in IEEE P1363 (raw `r || s`) format, convert it first using
+  [`p1363ToDer`](/api/utilities#p1363toder).
+</ParamField>
+
+## Return value
+
+<ResponseField name="verified" type="boolean">
+  `true` if the signature is cryptographically valid for the supplied
+  `foreignPublicKey` and `data`; `false` otherwise. A `false` result means the
+  data was tampered with, the wrong public key was used, or the signature bytes
+  are corrupt — but it does **not** throw an error.
+</ResponseField>
+
+<Note>
+  The `data` parameter is **not** pre-hashed. The plugin applies SHA-256
+  internally to match the behaviour of [`sign`](/api/sign). Pass the same raw
+  string to both methods to get a valid verification result.
+</Note>
+
+<Warning>
+  The signature **must** be in ASN.1 DER format. Many WebCrypto and
+  mobile-native APIs produce IEEE P1363 (raw `r || s`) format instead. Use the
+  [`p1363ToDer`](/api/utilities#p1363toder) utility to convert before calling
+  `verify` if necessary.
+</Warning>
+
+## Platform behaviour
+
+<Tabs>
+  <Tab title="iOS">
+    Calls the Security framework's `SecKeyVerifySignature` using the
+    `ecdsaSignatureMessageX962SHA256` algorithm. SHA-256 hashing is performed
+    internally by the OS before the signature check.
+  </Tab>
+  <Tab title="Android">
+    Uses `java.security.Signature` with `SHA256withECDSA`. The data is hashed
+    and verified inside the platform's cryptography provider.
+  </Tab>
+  <Tab title="Web">
+    Uses the browser's **WebCrypto API** (`SubtleCrypto.verify`) with
+    `{ name: 'ECDSA', hash: { name: 'SHA-256' } }`. Internally the DER
+    signature is converted to P1363 format (via
+    [`derToP1363`](/api/utilities#dertop1363)) before being passed to
+    `SubtleCrypto.verify`, because the WebCrypto API expects P1363. Only
+    available in **secure contexts** (`https://`).
+  </Tab>
+</Tabs>
+
+## Example
+
+### Basic sign-then-verify (same device)
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// 1. Generate (or load) an ECDSA key pair
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.app.auth',
+  algorithm: 'ecdsa',
+});
+
+// 2. Sign a challenge
+const challenge = 'server-issued-challenge-string';
+
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.app.auth',
+  data: challenge,
+});
+
+// 3. Verify the signature locally using the public key
+const { verified } = await CryptoApi.verify({
+  foreignPublicKey: publicKey!,
+  data: challenge,
+  signature: signature!,
+});
+
+console.log('Signature valid:', verified); // true
+```
+
+### Verifying a signature received from another party
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Public key and signature arrive from a remote signer
+const signerPublicKey = 'MFkwEwYH...'; // base64 SPKI
+const receivedData = 'the-message-that-was-signed';
+const receivedSignature = 'MEYCIQD...'; // base64 DER
+
+const { verified } = await CryptoApi.verify({
+  foreignPublicKey: signerPublicKey,
+  data: receivedData,
+  signature: receivedSignature,
+});
+
+if (verified) {
+  console.log('Message is authentic.');
+} else {
+  console.warn('Signature check failed — message may be tampered.');
+}
+```
+
+### Converting a P1363 signature before verifying
+
+```typescript
+import {
+  CryptoApi,
+  p1363ToDer,
+  base64ToArrayBuffer,
+  arrayBufferToBase64,
+  toArrayBuffer,
+} from '@perfood/capacitor-crypto-api';
+
+// Some external APIs (e.g. raw WebCrypto) return P1363 format
+const rawP1363Base64 = '...'; // 64-byte r || s for P-256, base64-encoded
+
+// Convert to DER before calling verify
+const p1363Bytes = base64ToArrayBuffer(rawP1363Base64);
+const derBytes = p1363ToDer(p1363Bytes);
+const derBase64 = arrayBufferToBase64(toArrayBuffer(derBytes));
+
+const { verified } = await CryptoApi.verify({
+  foreignPublicKey: 'MFkwEwYH...',
+  data: 'the-original-data',
+  signature: derBase64,
+});
+
+console.log('Verified:', verified);
+```
+
+## Error handling
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+try {
+  const { verified } = await CryptoApi.verify({
+    foreignPublicKey: signerPublicKey,
+    data: receivedData,
+    signature: receivedSignature,
+  });
+
+  // verified === false is a normal result — not an exception
+  if (!verified) {
+    console.warn('Signature is invalid.');
+  }
+} catch (error) {
+  // Errors indicate unexpected failures such as:
+  // - Malformed base64 in foreignPublicKey or signature
+  // - Signature bytes are not valid DER encoding
+  // - Public key bytes are not valid SPKI encoding
+  console.error('Verify threw an error:', error);
+}
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="sign" icon="pen-nib" href="/api/sign">
+    Produce an ECDSA signature with a secure-hardware private key.
+  </Card>
+  <Card title="generateKey" icon="key" href="/api/generate-key">
+    Generate the ECDSA key pair whose public key is used here.
+  </Card>
+  <Card title="loadKey" icon="folder-open" href="/api/load-key">
+    Retrieve an existing public key by tag.
+  </Card>
+  <Card title="Utilities" icon="wrench" href="/api/utilities">
+    Convert between DER and P1363 signature formats.
+  </Card>
+</CardGroup>

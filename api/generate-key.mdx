@@ -1,0 +1,165 @@
+---
+title: "generateKey — Create Hardware-Backed EC Key Pairs"
+sidebarTitle: "generateKey"
+description: "Generate a hardware-backed ECDSA or ECDH key pair in the Secure Enclave, StrongBox/TEE, or WebCrypto. The private key never leaves secure hardware."
+---
+
+The `generateKey` method creates a new elliptic curve key pair directly inside the device's secure hardware — the iOS Secure Enclave, Android StrongBox or TEE, or the browser's WebCrypto API in development. Only the public key is returned; the private key is generated inside the enclave and can never be extracted or exported. You can optionally require biometric authentication before the private key is used, adding a second layer of access control on top of the hardware boundary.
+
+## Signature
+
+```typescript
+CryptoApi.generateKey(options: GenerateKeyOptions): Promise<GenerateKeyResponse>
+```
+
+## Parameters
+
+<ParamField body="tag" type="string" required>
+  A unique string identifier for the key pair. Use this tag in subsequent calls
+  to `sign`, `encrypt`, `loadKey`, or `deleteKey` to reference this specific
+  key. Choose a stable, application-specific value such as
+  `"com.myapp.user.auth"` to avoid collisions across users or sessions.
+</ParamField>
+
+<ParamField body="algorithm" type="'ecdsa' | 'ecdh'" required>
+  The elliptic curve algorithm to use when generating the key pair. Both
+  algorithms use the **NIST P-256** curve.
+
+  - `"ecdsa"` — Use for signing and verifying data. Required for `sign` / `verify` operations.
+  - `"ecdh"` — Use for key agreement and derived symmetric encryption. Required for `encrypt` / `decrypt` operations.
+</ParamField>
+
+<ParamField body="type" type="BiometryType">
+  Optional biometric protection to apply to the private key. When set, the
+  device will prompt the user for biometric (or passcode) verification before
+  allowing the key to be used for signing or decryption.
+
+  | Value | Behaviour |
+  |---|---|
+  | `"BIOMETRY"` | Require biometric authentication only (Face ID, fingerprint, etc.) |
+  | `"BIOMETRY_OR_PASSCODE"` | Accept biometrics or the device passcode as a fallback |
+  | `"PASSCODE"` | Require the device passcode |
+
+  Omit this field to generate a key that requires no additional user
+  authentication beyond device unlock.
+</ParamField>
+
+## Response
+
+<ResponseField name="publicKey" type="string">
+  The generated public key encoded as a **base64 string** in SPKI (SubjectPublicKeyInfo) DER format. Returns `undefined` if key generation fails. Store this value server-side to verify signatures or to perform ECDH key exchange.
+</ResponseField>
+
+<Note>
+  The private key is generated and permanently stored inside the device's secure
+  hardware. It is **never** returned, serialised, or made accessible to
+  application code. Only the public key is surfaced through this API.
+</Note>
+
+## Examples
+
+<Tabs>
+  <Tab title="ECDSA Key">
+    Generate a key pair for cryptographic authentication. The public key can be
+    registered on a backend server and later used to verify challenge signatures.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    // Generate an ECDSA key pair for signing challenges
+    const { publicKey } = await CryptoApi.generateKey({
+      tag: 'com.myapp.user.auth',
+      algorithm: 'ecdsa',
+    });
+
+    if (publicKey) {
+      console.log('ECDSA public key (base64 SPKI):', publicKey);
+
+      // Register the public key with your backend
+      await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ publicKey }),
+      });
+    }
+    ```
+  </Tab>
+  <Tab title="ECDH Key">
+    Generate a key pair for secure key exchange and AES-GCM encrypted
+    communication with a remote party.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    // Generate an ECDH key pair for encrypted messaging
+    const { publicKey } = await CryptoApi.generateKey({
+      tag: 'com.myapp.user.messaging',
+      algorithm: 'ecdh',
+    });
+
+    if (publicKey) {
+      console.log('ECDH public key (base64 SPKI):', publicKey);
+
+      // Exchange public key with remote peer for key agreement
+      await fetch('/api/exchange-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ publicKey }),
+      });
+    }
+    ```
+  </Tab>
+  <Tab title="Biometric Protection">
+    Require biometric verification before the private key can be used. The
+    native biometrics dialog (Face ID / Touch ID / fingerprint) will appear
+    automatically during `sign` or `decrypt` calls.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    // Generate a biometric-protected ECDSA key pair
+    const { publicKey } = await CryptoApi.generateKey({
+      tag: 'com.myapp.user.auth.biometric',
+      algorithm: 'ecdsa',
+      type: 'BIOMETRY_OR_PASSCODE',
+    });
+
+    if (publicKey) {
+      console.log('Biometric-protected public key:', publicKey);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Platform behaviour
+
+<CardGroup cols={3}>
+  <Card title="iOS — Secure Enclave" icon="apple">
+    Keys are generated inside the Secure Enclave coprocessor using NIST P-256.
+    The private key hardware-binding is enforced at the silicon level and cannot
+    be bypassed by software, even with root access.
+  </Card>
+  <Card title="Android — StrongBox / TEE" icon="android">
+    Keys are stored in StrongBox (dedicated secure element) when available, with
+    automatic fallback to the Trusted Execution Environment (TEE). Behaviour
+    varies by device manufacturer and Android version.
+  </Card>
+  <Card title="Web — WebCrypto API" icon="browser">
+    During development, keys are generated using the browser's WebCrypto API and
+    persisted in `localStorage`. WebCrypto is only available in **secure
+    contexts** (HTTPS or `localhost`). Not suitable for production use.
+  </Card>
+</CardGroup>
+
+<Warning>
+  If a key with the same `tag` and `algorithm` already exists, calling
+  `generateKey` again will **overwrite** it. The previous key pair will be
+  permanently lost. Use `loadKey` first to check whether a key already exists
+  for a given tag before generating a new one.
+</Warning>
+
+<Tip>
+  All curve operations use **NIST P-256** (`secp256r1`). This is the only curve
+  supported by the iOS Secure Enclave. Android and Web platforms follow the same
+  constraint for cross-platform consistency.
+</Tip>

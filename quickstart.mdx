@@ -1,47 +1,346 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Capacitor Crypto API"
+sidebarTitle: "Quickstart"
+description: "Step-by-step guide to generate an ECDSA key pair in secure hardware, sign data, verify a signature, then encrypt and decrypt a message with ECDH and AES-GCM."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks through the two most common cryptographic workflows in `@perfood/capacitor-crypto-api`: **ECDSA signing** for challenge-response authentication, and **ECDH encryption** for end-to-end encrypted messaging. Both flows use the same `generateKey` entry point and work identically on iOS (Secure Enclave), Android (StrongBox/TEE), and Web (WebCrypto) — your TypeScript code is the same on every platform.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+Before starting, make sure you have completed the [installation steps](/installation) and that `@perfood/capacitor-crypto-api` is listed in your `package.json`.
 
-## Prerequisites
+---
 
-Before you begin, you must have:
+## ECDSA: Sign and verify data
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+ECDSA is the right choice when you need to **prove identity** — for example, letting a server verify that the request came from the device that holds a known public key. The private key never leaves secure hardware; the server only ever needs the public key.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Import the plugin">
+    Add the import at the top of your TypeScript file. The `CryptoApi` object is the single entry point for all plugin methods.
 
-    ```bash
-    npm install your-package
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
+  <Step title="Generate an ECDSA key pair">
+    Call `generateKey` with `algorithm: 'ecdsa'` and a unique `tag` string. The tag is a stable identifier you use to reference this key pair later. The private key is created inside the secure hardware and cannot be exported — only the **public key** is returned in base64 (SPKI format).
+
+    ```typescript
+    const { publicKey } = await CryptoApi.generateKey({
+      tag: 'com.example.app.auth',
+      algorithm: 'ecdsa',
+    });
+
+    console.log('Public key (base64 SPKI):', publicKey);
+    // → "MFkwEwYHKoZIzj0CAQY..."
+    ```
+
+    <Tip>
+      If a key already exists for the given `tag` and `algorithm`, `generateKey` returns the existing public key without overwriting the key pair. This makes it safe to call on every app launch as an idempotent key-load pattern.
+    </Tip>
+
+    To require biometric authentication whenever the key is used, pass the `type` option during generation:
+
+    ```typescript
+    const { publicKey } = await CryptoApi.generateKey({
+      tag: 'com.example.app.auth',
+      algorithm: 'ecdsa',
+      type: 'BIOMETRY_OR_PASSCODE', // 'BIOMETRY' | 'BIOMETRY_OR_PASSCODE' | 'PASSCODE'
+    });
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+  <Step title="Register the public key with your server">
+    Send the returned `publicKey` to your backend and associate it with the user account. The server will use it later to verify signatures.
+
+    ```typescript
+    await fetch('https://api.example.com/keys/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag: 'com.example.app.auth',
+        publicKey,
+      }),
+    });
+    ```
+  </Step>
+
+  <Step title="Sign a challenge">
+    When the server issues an authentication challenge (a random string or nonce), pass it to `sign` along with the `tag` of the key pair to use. The operation runs entirely inside secure hardware — the private key is never exposed to your app code.
+
+    ```typescript
+    // challenge is a string received from your server
+    const challenge = 'a9f3c2d1e8b74056...';
+
+    const { signature } = await CryptoApi.sign({
+      tag: 'com.example.app.auth',
+      data: challenge,
+    });
+
+    console.log('Signature (base64 DER):', signature);
+    ```
+
+    <Note>
+      On iOS and Android the signature is returned in **ASN.1 DER** format. If your server or a Web Crypto verification call expects the raw **IEEE P1363** format, use the bundled `derToP1363` utility to convert it.
+    </Note>
+  </Step>
+
+  <Step title="Verify the signature">
+    You can verify a signature locally (client-side) using `verify`. Pass the signer's public key, the original data string, and the base64 DER signature. This is useful for local self-checks or for verifying a peer's signature.
+
+    ```typescript
+    const { verified } = await CryptoApi.verify({
+      foreignPublicKey: publicKey,   // base64 SPKI public key of the signer
+      data: challenge,               // the original plain-text data that was signed
+      signature: signature,          // base64 DER signature returned by sign()
+    });
+
+    console.log('Signature valid:', verified); // → true
+    ```
+
+    <Tip>
+      Server-side verification with Node.js `crypto` or any OpenSSL-compatible library works directly with the DER-encoded signature and the SPKI-encoded public key — no conversion needed on the server side.
+    </Tip>
+  </Step>
+
+  <Step title="(Optional) Load or delete the key">
+    Use `loadKey` to retrieve the public key at any time without regenerating the pair, and `deleteKey` to permanently remove the key from secure hardware.
+
+    ```typescript
+    // Reload the public key (e.g. after an app restart)
+    const { publicKey: existingKey } = await CryptoApi.loadKey({
+      tag: 'com.example.app.auth',
+      algorithm: 'ecdsa',
+    });
+
+    // Permanently delete the key pair
+    await CryptoApi.deleteKey({
+      tag: 'com.example.app.auth',
+      algorithm: 'ecdsa',
+    });
     ```
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+### Complete ECDSA example
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.app.auth';
+
+async function setupAndAuthenticate(): Promise<boolean> {
+  // 1. Generate (or load) the ECDSA key pair
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: TAG,
+    algorithm: 'ecdsa',
+  });
+
+  if (!publicKey) {
+    throw new Error('Key generation failed');
+  }
+
+  // 2. Register the public key with the server (first time only)
+  await fetch('https://api.example.com/keys/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag: TAG, publicKey }),
+  });
+
+  // 3. Request a challenge from the server
+  const challengeResponse = await fetch('https://api.example.com/challenge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag: TAG }),
+  });
+  const { challenge } = await challengeResponse.json();
+
+  // 4. Sign the challenge in secure hardware
+  const { signature } = await CryptoApi.sign({
+    tag: TAG,
+    data: challenge,
+  });
+
+  if (!signature) {
+    throw new Error('Signing failed');
+  }
+
+  // 5. Optionally verify locally before sending
+  const { verified: localVerified } = await CryptoApi.verify({
+    foreignPublicKey: publicKey,
+    data: challenge,
+    signature,
+  });
+  console.log('Local verification:', localVerified);
+
+  // 6. Send to server for authoritative verification
+  const authResponse = await fetch('https://api.example.com/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challenge, signature }),
+  });
+  const { authenticated } = await authResponse.json();
+  return authenticated;
+}
+```
+
+---
+
+## ECDH: Encrypt and decrypt messages
+
+ECDH key agreement lets two parties derive the same shared secret from each other's public keys, without ever transmitting the secret itself. The plugin uses the derived secret as a 256-bit AES-GCM key to encrypt and decrypt data.
+
+<Steps>
+  <Step title="Generate an ECDH key pair for each party">
+    Both parties (e.g. the client app and a server, or two clients) must each generate their own ECDH key pair. Each generates one locally with `algorithm: 'ecdh'`.
+
+    ```typescript
+    // Party A (your app)
+    const { publicKey: myPublicKey } = await CryptoApi.generateKey({
+      tag: 'com.example.app.ecdh',
+      algorithm: 'ecdh',
+    });
+
+    console.log('My ECDH public key:', myPublicKey);
+    ```
+  </Step>
+
+  <Step title="Exchange public keys">
+    The two parties exchange their public keys over any channel (they are not secret). Each party stores the other's public key as `foreignPublicKey`.
+
+    ```typescript
+    // Send myPublicKey to the other party and receive theirs
+    const foreignPublicKey = await exchangePublicKey(myPublicKey);
+    ```
+  </Step>
+
+  <Step title="Encrypt data">
+    Call `encrypt` with your key tag, the other party's public key, and the plaintext. Internally, the plugin performs ECDH key agreement to derive a shared AES-GCM-256 key, then encrypts the plaintext. It returns both the **IV** and the **ciphertext** in base64 — you must store or transmit both.
+
+    ```typescript
+    const { iv, ciphertext } = await CryptoApi.encrypt({
+      tag: 'com.example.app.ecdh',       // your ECDH key pair tag
+      foreignPublicKey: foreignPublicKey, // the other party's public key (base64 SPKI)
+      plaintext: 'Hello, secure world!',
+    });
+
+    console.log('IV:', iv);
+    console.log('Ciphertext:', ciphertext);
+    ```
+
+    <Note>
+      A fresh random 12-byte IV is generated for every `encrypt` call. Never reuse an IV with the same key — the plugin handles this automatically.
+    </Note>
+  </Step>
+
+  <Step title="Decrypt data">
+    The receiving party calls `decrypt` with their own key tag, the sender's public key, and the IV and ciphertext received from the sender. ECDH key agreement is performed again to derive the same shared secret, and the ciphertext is decrypted.
+
+    ```typescript
+    const { plaintext } = await CryptoApi.decrypt({
+      tag: 'com.example.app.ecdh',       // your ECDH key pair tag
+      foreignPublicKey: foreignPublicKey, // the sender's public key (base64 SPKI)
+      iv,
+      ciphertext,
+    });
+
+    console.log('Decrypted:', plaintext); // → 'Hello, secure world!'
+    ```
+  </Step>
+</Steps>
+
+### Complete ECDH example
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.app.ecdh';
+
+async function encryptedMessaging() {
+  // 1. Generate this device's ECDH key pair (idempotent)
+  const { publicKey: myPublicKey } = await CryptoApi.generateKey({
+    tag: TAG,
+    algorithm: 'ecdh',
+  });
+
+  if (!myPublicKey) {
+    throw new Error('ECDH key generation failed');
+  }
+
+  // 2. Exchange public keys with the remote party
+  //    (in a real app this happens over your API)
+  const foreignPublicKey = await fetchRemotePublicKey(myPublicKey);
+
+  // ── Encryption (sender side) ──────────────────────────────────────
+  const { iv, ciphertext } = await CryptoApi.encrypt({
+    tag: TAG,
+    foreignPublicKey,
+    plaintext: 'Secret message',
+  });
+
+  // Transmit { iv, ciphertext } to the recipient
+
+  // ── Decryption (recipient side, same or different device) ─────────
+  const { plaintext } = await CryptoApi.decrypt({
+    tag: TAG,
+    foreignPublicKey, // the sender's public key from the recipient's perspective
+    iv,
+    ciphertext,
+  });
+
+  console.log('Received:', plaintext); // → 'Secret message'
+}
+
+async function fetchRemotePublicKey(myPublicKey: string): Promise<string> {
+  const response = await fetch('https://api.example.com/ecdh/exchange', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ publicKey: myPublicKey }),
+  });
+  const { foreignPublicKey } = await response.json();
+  return foreignPublicKey;
+}
+```
+
+---
+
+## Signature format conversion
+
+If you need to convert signatures between **DER** (used by iOS/Android) and **P1363** (used by WebCrypto), the plugin exports two utility functions:
+
+```typescript
+import {
+  p1363ToDer,
+  derToP1363,
+  base64ToArrayBuffer,
+  arrayBufferToBase64,
+} from '@perfood/capacitor-crypto-api';
+
+// Convert a raw P1363 signature (WebCrypto output) to DER
+const rawBytes = base64ToArrayBuffer(p1363SignatureBase64);
+const derBytes = p1363ToDer(rawBytes);
+const derBase64 = arrayBufferToBase64(derBytes.buffer);
+
+// Convert a DER signature (iOS/Android output) to P1363
+const derBytes2 = base64ToArrayBuffer(derSignatureBase64);
+const rawBytes2 = derToP1363(derBytes2);
+const p1363Base64 = arrayBufferToBase64(rawBytes2.buffer);
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="ECDSA Authentication Guide" icon="key" href="/guides/ecdsa-authentication">
+    Deep dive into challenge-response authentication flows, biometric key protection, and server-side verification patterns.
+  </Card>
+  <Card title="ECDH Encryption Guide" icon="lock" href="/guides/ecdh-encryption">
+    Learn how to build end-to-end encrypted channels, manage key rotation, and handle multiple recipients.
+  </Card>
+  <Card title="Passkeys (WebAuthn)" icon="fingerprint" href="/guides/passkeys">
+    Add passwordless login to your app using native passkey dialogs on iOS and Android.
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/generate-key">
+    Complete parameter and return-type documentation for every method in the plugin.
+  </Card>
+</CardGroup>

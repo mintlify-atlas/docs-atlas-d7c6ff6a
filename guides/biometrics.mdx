@@ -1,0 +1,311 @@
+---
+title: "Protect Keys with Biometric Authentication"
+sidebarTitle: "Biometrics"
+description: "Gate cryptographic operations behind Face ID, fingerprint, or device passcode using BiometryType on generateKey, sign, encrypt, and decrypt — with runtime status checks."
+---
+
+Biometric authentication adds a second layer of protection to hardware-backed keys. When you associate a key with a `BiometryType`, the OS requires the user to present their biometrics or passcode before the secure hardware performs the requested operation — the private key is never exposed regardless. This guide explains how to check device capabilities at runtime, generate biometric-protected keys, and use them for signing and encryption.
+
+## BiometryType options
+
+The `type` parameter accepted by `generateKey`, `sign`, `encrypt`, and `decrypt` is a union of three string literals:
+
+| Value | Behaviour |
+|---|---|
+| `'BIOMETRY'` | Requires biometric verification only (Face ID, fingerprint, or iris). Falls back to an error if no biometrics are enrolled. |
+| `'BIOMETRY_OR_PASSCODE'` | Tries biometrics first; allows device passcode as fallback. Recommended for the widest compatibility. |
+| `'PASSCODE'` | Requires device passcode only, regardless of enrolled biometrics. |
+
+## Checking device capabilities before use
+
+Always query the device's biometrics capabilities before presenting the UI, so you can show an appropriate prompt or gracefully degrade.
+
+### Check if a specific biometry type is enabled
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+import type { BiometryType } from '@perfood/capacitor-crypto-api';
+
+async function checkBiometricsEnabled(type: BiometryType): Promise<boolean> {
+  const { isEnabled } = await CryptoApi.isBiometricsEnabled({ type });
+  return isEnabled;
+}
+
+// Usage
+const biometryAvailable = await checkBiometricsEnabled('BIOMETRY');
+const passcodeAvailable = await checkBiometricsEnabled('PASSCODE');
+
+console.log('Biometry available:', biometryAvailable);
+console.log('Passcode available:', passcodeAvailable);
+```
+
+### Get detailed biometrics status
+
+`getBiometricsStatus` returns a `BiometricsStatus` value with more detail than a simple boolean:
+
+| Status | Meaning |
+|---|---|
+| `'SUCCESS'` | The requested biometry type is available and enrolled. |
+| `'HARDWARE_UNAVAILABLE'` | The device hardware for this biometry type is not present or is temporarily unavailable. |
+| `'NONE_ENROLLED'` | Hardware is present but no biometrics are enrolled. |
+| `'UNKNOWN'` | Status could not be determined (also returned on the web platform). |
+
+```typescript
+import type { BiometricsStatus } from '@perfood/capacitor-crypto-api';
+
+async function getBiometricsStatus(type: BiometryType): Promise<BiometricsStatus> {
+  const { status } = await CryptoApi.getBiometricsStatus({ type });
+  return status;
+}
+
+async function checkAndPromptEnrollment(): Promise<void> {
+  const status = await getBiometricsStatus('BIOMETRY');
+
+  switch (status) {
+    case 'SUCCESS':
+      console.log('Biometrics ready.');
+      break;
+    case 'NONE_ENROLLED':
+      // Prompt the user to enrol biometrics in system settings
+      console.warn('No biometrics enrolled. Direct user to Settings.');
+      break;
+    case 'HARDWARE_UNAVAILABLE':
+      console.warn('Biometric hardware unavailable on this device.');
+      break;
+    case 'UNKNOWN':
+      console.warn('Biometrics status could not be determined.');
+      break;
+  }
+}
+```
+
+### Discover available biometric hardware
+
+`getAvailableHardware` returns an array of `BiometricsHardware` values representing the sensors present on the device:
+
+| Value | Sensor |
+|---|---|
+| `'FINGER'` | Fingerprint scanner (Touch ID, in-display scanner, etc.) |
+| `'IRIS'` | Iris scanner |
+| `'FACE'` | Face recognition camera (Face ID, Android face unlock) |
+
+```typescript
+import type { BiometricsHardware } from '@perfood/capacitor-crypto-api';
+
+async function listAvailableHardware(): Promise<BiometricsHardware[]> {
+  const { hardware } = await CryptoApi.getAvailableHardware();
+  return hardware;
+}
+
+const sensors = await listAvailableHardware();
+// e.g. ['FACE', 'FINGER'] on an iPhone with Face ID and USB-C biometric cable
+console.log('Available sensors:', sensors);
+```
+
+<Note>
+  On the web platform, `getAvailableHardware` always returns an empty array `[]` because the plugin cannot introspect the browser's authenticator hardware directly.
+</Note>
+
+### Check if a device passcode is set
+
+```typescript
+async function isPasscodeSet(): Promise<boolean> {
+  const { isDevicePasscodeSet } = await CryptoApi.isDevicePasscodeSet();
+  return isDevicePasscodeSet;
+}
+```
+
+### Check for secure hardware
+
+Use `hasSecureHardware` to confirm the device has dedicated hardware security (Android StrongBox). On iOS this always reflects the Secure Enclave.
+
+```typescript
+async function checkSecureHardware(): Promise<boolean> {
+  const { hasSecureHardware } = await CryptoApi.hasSecureHardware();
+  return hasSecureHardware;
+}
+```
+
+## Generating biometric-protected keys
+
+Pass a `type` value to `generateKey` to bind the key's usage to biometric verification. Once set at key creation time, the OS enforces this requirement on every subsequent use of that key.
+
+<Steps>
+
+### Determine the best available type
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+import type { BiometryType } from '@perfood/capacitor-crypto-api';
+
+async function selectBiometryType(): Promise<BiometryType | undefined> {
+  const { isEnabled: biometryEnabled } = await CryptoApi.isBiometricsEnabled({
+    type: 'BIOMETRY',
+  });
+
+  if (biometryEnabled) {
+    return 'BIOMETRY_OR_PASSCODE'; // preferred: biometrics with passcode fallback
+  }
+
+  const { isDevicePasscodeSet } = await CryptoApi.isDevicePasscodeSet();
+  if (isDevicePasscodeSet) {
+    return 'PASSCODE';
+  }
+
+  // No biometrics or passcode — key will not be biometric-protected
+  return undefined;
+}
+```
+
+### Generate a biometric-protected ECDSA key
+
+```typescript
+const TAG = 'com.example.app.biometric-auth';
+
+async function generateBiometricKey(): Promise<string> {
+  const biometryType = await selectBiometryType();
+
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: TAG,
+    algorithm: 'ecdsa',
+    type: biometryType, // undefined means no biometric protection
+  });
+
+  if (!publicKey) {
+    throw new Error('Key generation failed.');
+  }
+
+  return publicKey;
+}
+```
+
+<Warning>
+  The `type` you provide at key generation time is stored with the key in secure hardware. You must pass the same (or a compatible) `type` value in subsequent `sign`, `encrypt`, and `decrypt` calls, otherwise the OS will reject the operation.
+</Warning>
+
+### Generate a biometric-protected ECDH key
+
+```typescript
+const ECDH_TAG = 'com.example.app.biometric-ecdh';
+
+async function generateBiometricECDHKey(): Promise<string> {
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: ECDH_TAG,
+    algorithm: 'ecdh',
+    type: 'BIOMETRY_OR_PASSCODE',
+  });
+
+  if (!publicKey) {
+    throw new Error('ECDH key generation failed.');
+  }
+
+  return publicKey;
+}
+```
+
+</Steps>
+
+## Using biometric-protected keys
+
+### Biometric-protected signing
+
+```typescript
+async function signWithBiometrics(challenge: string): Promise<string> {
+  // The native biometrics dialog appears here
+  const { signature } = await CryptoApi.sign({
+    tag: TAG,
+    data: challenge,
+    type: 'BIOMETRY_OR_PASSCODE',
+  });
+
+  if (!signature) {
+    throw new Error('Signing failed or user cancelled biometric prompt.');
+  }
+
+  return signature;
+}
+```
+
+### Biometric-protected encryption and decryption
+
+```typescript
+const ECDH_TAG = 'com.example.app.biometric-ecdh';
+
+async function encryptWithBiometrics(
+  plaintext: string,
+  foreignPublicKey: string,
+): Promise<{ iv: string; ciphertext: string }> {
+  // Native biometrics dialog shown before encryption
+  const { iv, ciphertext } = await CryptoApi.encrypt({
+    tag: ECDH_TAG,
+    foreignPublicKey,
+    plaintext,
+    type: 'BIOMETRY_OR_PASSCODE',
+  });
+
+  return { iv, ciphertext };
+}
+
+async function decryptWithBiometrics(
+  iv: string,
+  ciphertext: string,
+  foreignPublicKey: string,
+): Promise<string> {
+  // Native biometrics dialog shown before decryption
+  const { plaintext } = await CryptoApi.decrypt({
+    tag: ECDH_TAG,
+    foreignPublicKey,
+    iv,
+    ciphertext,
+    type: 'BIOMETRY_OR_PASSCODE',
+  });
+
+  return plaintext;
+}
+```
+
+## Full setup guard example
+
+A utility function that checks device readiness before attempting any biometric-protected operation:
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+async function assertBiometricsReady(): Promise<void> {
+  const { hasSecureHardware } = await CryptoApi.hasSecureHardware();
+  if (!hasSecureHardware) {
+    throw new Error('This device does not have secure hardware (StrongBox/TEE).');
+  }
+
+  const { status } = await CryptoApi.getBiometricsStatus({ type: 'BIOMETRY_OR_PASSCODE' });
+  if (status !== 'SUCCESS') {
+    throw new Error(
+      `Biometrics not available: ${status}. ` +
+      'Please ensure biometrics or a device passcode is set up in your device settings.',
+    );
+  }
+}
+
+// Use before any biometric-protected key generation or operation
+await assertBiometricsReady();
+
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.app.secure',
+  algorithm: 'ecdsa',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+```
+
+## Platform notes
+
+<Accordion title="iOS — Secure Enclave">
+  On iOS, biometric protection is enforced by the Secure Enclave. When `type` is set, the Secure Enclave requires a successful biometric evaluation via `LAContext` before authorising the private key operation. The key never leaves the enclave. Face ID and Touch ID are both supported via `BIOMETRY`.
+</Accordion>
+
+<Accordion title="Android — StrongBox / TEE">
+  On Android, biometric protection is configured via `KeyGenParameterSpec.Builder.setUserAuthenticationRequired(true)` with the appropriate `BiometricManager` constraints. StrongBox is used when available; otherwise TEE is the fallback. `getAvailableHardware()` returns the actual sensors present on the device.
+</Accordion>
+
+<Accordion title="Web — WebCrypto">
+  The web implementation always returns `isEnabled: false` from `isBiometricsEnabled`, `status: 'UNKNOWN'` from `getBiometricsStatus`, and an empty array from `getAvailableHardware`. The `type` field is accepted but ignored. Keys are stored in `localStorage` without biometric protection — this implementation is intended for development only.
+</Accordion>

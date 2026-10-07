@@ -1,0 +1,156 @@
+---
+title: "getECDSATags / getECDHTags — List Stored Key Tags"
+sidebarTitle: "Get Tags"
+description: "List all ECDSA or ECDH key pair tags currently stored in the Secure Enclave (iOS), StrongBox/TEE (Android), or WebCrypto localStorage (Web)."
+---
+
+The `getECDSATags` and `getECDHTags` methods return the complete list of key pair tags currently held in the device's secure hardware for each respective algorithm. Each tag is the string identifier that was provided when the key was created with `generateKey`. These methods are useful for auditing which keys have been provisioned on the device, building key management UIs, or discovering existing keys after an application reinstall or migration. Both methods take no parameters and return a `tags` array that may be empty if no keys of that type have been generated.
+
+## Signatures
+
+```typescript
+CryptoApi.getECDSATags(): Promise<GetTagsResponse>
+CryptoApi.getECDHTags(): Promise<GetTagsResponse>
+```
+
+## Parameters
+
+Both methods take **no parameters**.
+
+## Response
+
+<ResponseField name="tags" type="string[]">
+  An array of tag strings identifying all stored key pairs of the respective
+  algorithm type. Each entry corresponds to the `tag` value that was supplied
+  when calling `generateKey`. Returns an empty array `[]` when no keys of the
+  queried type exist in secure storage.
+</ResponseField>
+
+## Examples
+
+<Tabs>
+  <Tab title="List All ECDSA Tags">
+    Retrieve every ECDSA key pair tag that has been provisioned on the device.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    const { tags } = await CryptoApi.getECDSATags();
+
+    if (tags.length === 0) {
+      console.log('No ECDSA keys found on this device.');
+    } else {
+      console.log('ECDSA key tags:', tags);
+      // e.g. ['com.myapp.user.auth', 'com.myapp.admin.auth']
+    }
+    ```
+  </Tab>
+  <Tab title="List All ECDH Tags">
+    Retrieve every ECDH key pair tag that has been provisioned on the device.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    const { tags } = await CryptoApi.getECDHTags();
+
+    if (tags.length === 0) {
+      console.log('No ECDH keys found on this device.');
+    } else {
+      console.log('ECDH key tags:', tags);
+      // e.g. ['com.myapp.user.messaging', 'com.myapp.backup.encryption']
+    }
+    ```
+  </Tab>
+  <Tab title="Audit All Key Material">
+    List both ECDSA and ECDH keys in a single pass to get a complete picture of
+    all key material stored on the device.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    const [{ tags: ecdsaTags }, { tags: ecdhTags }] = await Promise.all([
+      CryptoApi.getECDSATags(),
+      CryptoApi.getECDHTags(),
+    ]);
+
+    console.log('All ECDSA tags:', ecdsaTags);
+    console.log('All ECDH tags:', ecdhTags);
+    console.log('Total key pairs stored:', ecdsaTags.length + ecdhTags.length);
+    ```
+  </Tab>
+  <Tab title="Clean Up Stale Keys">
+    Compare stored tags against a known set of active user tags and delete any
+    orphaned keys left over from previous sessions.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    async function cleanUpStaleKeys(activeTag: string): Promise<void> {
+      const { tags } = await CryptoApi.getECDSATags();
+
+      const staleTags = tags.filter((tag) => tag !== activeTag);
+
+      for (const tag of staleTags) {
+        await CryptoApi.deleteKey({ tag, algorithm: 'ecdsa' });
+        console.log('Removed stale ECDSA key:', tag);
+      }
+    }
+
+    await cleanUpStaleKeys('com.myapp.user.auth');
+    ```
+  </Tab>
+</Tabs>
+
+## Checking for a specific tag
+
+Rather than loading tags to test key existence, prefer `loadKey` when you only need to confirm whether a single key is present. Use `getECDSATags` or `getECDHTags` when you need the full inventory.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Preferred for single-key existence checks
+const { publicKey } = await CryptoApi.loadKey({
+  tag: 'com.myapp.user.auth',
+  algorithm: 'ecdsa',
+});
+const exists = publicKey !== undefined;
+
+// Use getECDSATags for full inventory / iteration use cases
+const { tags } = await CryptoApi.getECDSATags();
+const alsoExists = tags.includes('com.myapp.user.auth');
+```
+
+<Accordion title="Why are ECDSA and ECDH tags separate?">
+  ECDSA and ECDH key pairs serve fundamentally different cryptographic purposes
+  and are stored as distinct entries in secure hardware. A tag like
+  `"com.myapp.user"` can exist independently as both an ECDSA key (for signing)
+  and an ECDH key (for encryption) — they do not conflict with each other.
+  Separating the tag lists means you can manage signing and encryption keys
+  independently and reason clearly about which algorithm a given tag belongs to.
+</Accordion>
+
+## Platform behaviour
+
+<CardGroup cols={3}>
+  <Card title="iOS — Secure Enclave" icon="apple">
+    Queries the iOS keychain for all items matching the plugin's ECDSA or ECDH
+    key class. Returns tags for all entries created by the plugin on this
+    device, regardless of the current user session.
+  </Card>
+  <Card title="Android — StrongBox / TEE" icon="android">
+    Enumerates the Android Keystore aliases that were created by the plugin for
+    the specified algorithm. The alias format is managed internally by the
+    plugin.
+  </Card>
+  <Card title="Web — WebCrypto API" icon="browser">
+    Reads key metadata from `localStorage`. Tags are persisted between page
+    reloads but will be absent if browser storage has been cleared or if the
+    origin has changed.
+  </Card>
+</CardGroup>
+
+<Info>
+  The order of tags in the returned array is not guaranteed to be stable across
+  calls or platforms. Sort the array yourself if a consistent display order is
+  required in your UI.
+</Info>

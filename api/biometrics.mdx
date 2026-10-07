@@ -1,0 +1,207 @@
+---
+title: "Biometrics API — Query Device Biometric Capabilities"
+sidebarTitle: "Biometrics"
+description: "Check biometric availability, enrollment status, hardware type, and device passcode on iOS, Android, and Web using the Capacitor Crypto API."
+---
+
+The Biometrics API provides four methods that let you inspect the biometric security posture of the device before performing sensitive cryptographic operations. Use these methods to verify that the required authentication hardware is enrolled and ready, to enumerate which biometric modalities are physically present, and to confirm that at least a device passcode fallback is configured.
+
+## Type Reference
+
+### `BiometryType`
+
+The `BiometryType` union controls which authentication mechanism is queried or required for a given call.
+
+<Tabs>
+  <Tab title="Values">
+    | Value | Description |
+    |---|---|
+    | `'BIOMETRY'` | Biometric authentication only (fingerprint, face, iris). |
+    | `'BIOMETRY_OR_PASSCODE'` | Biometric authentication with device passcode as a fallback. |
+    | `'PASSCODE'` | Device passcode (PIN / pattern / password) only, no biometrics. |
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    type BiometryType = 'BIOMETRY' | 'BIOMETRY_OR_PASSCODE' | 'PASSCODE';
+    ```
+  </Tab>
+</Tabs>
+
+### `BiometricsStatus`
+
+Returned by `getBiometricsStatus` to describe the current enrollment and hardware state.
+
+| Value | Description |
+|---|---|
+| `'SUCCESS'` | The requested biometry type is available and at least one credential is enrolled. |
+| `'HARDWARE_UNAVAILABLE'` | The required hardware is not present or is temporarily unavailable. |
+| `'NONE_ENROLLED'` | Hardware is present but no credentials are enrolled. |
+| `'UNKNOWN'` | Status cannot be determined (e.g., on Web where biometry APIs are not exposed). |
+
+### `BiometricsHardware`
+
+Individual hardware sensor types returned by `getAvailableHardware`.
+
+| Value | Description |
+|---|---|
+| `'FINGER'` | Fingerprint sensor. |
+| `'IRIS'` | Iris scanner. |
+| `'FACE'` | Face recognition camera. |
+
+---
+
+## `isBiometricsEnabled`
+
+```typescript
+CryptoApi.isBiometricsEnabled(options: BiometricsEnabledOptions): Promise<BiometricsEnabledResponse>
+```
+
+Returns a boolean indicating whether the specified biometry type is enabled — meaning the hardware exists **and** at least one credential is enrolled. On Web this always resolves to `{ isEnabled: false }` because browser APIs do not expose low-level biometry state.
+
+### Parameters
+
+<ParamField body="type" type="BiometryType" required>
+  The authentication mechanism to check. Pass `'BIOMETRY'` to query fingerprint/face/iris sensors, `'PASSCODE'` to query the device PIN/password, or `'BIOMETRY_OR_PASSCODE'` to check whether either is enabled.
+</ParamField>
+
+### Response
+
+<ResponseField name="isEnabled" type="boolean">
+  `true` when the specified biometry type is both supported by the device hardware and has enrolled credentials.
+</ResponseField>
+
+---
+
+## `getBiometricsStatus`
+
+```typescript
+CryptoApi.getBiometricsStatus(options: BiometricsStatusOptions): Promise<BiometricsStatusResponse>
+```
+
+Returns a fine-grained `BiometricsStatus` string describing exactly why biometry may or may not be usable. This gives more detail than the simple boolean returned by `isBiometricsEnabled` — for example it distinguishes between missing hardware and enrolled-but-disabled credentials.
+
+### Parameters
+
+<ParamField body="type" type="BiometryType" required>
+  The authentication mechanism whose status you want to retrieve.
+</ParamField>
+
+### Response
+
+<ResponseField name="status" type="BiometricsStatus">
+  One of `'SUCCESS'`, `'HARDWARE_UNAVAILABLE'`, `'NONE_ENROLLED'`, or `'UNKNOWN'`. On Web the return value is always `'UNKNOWN'`.
+</ResponseField>
+
+---
+
+## `getAvailableHardware`
+
+```typescript
+CryptoApi.getAvailableHardware(): Promise<AvailableHardwareResponse>
+```
+
+Returns the list of biometric sensor types that are physically present on the device, regardless of enrollment state. This is useful for tailoring UI prompts — for instance showing a fingerprint icon versus a face-scan icon. On Web this always resolves to an empty array.
+
+### Response
+
+<ResponseField name="hardware" type="BiometricsHardware[]">
+  An array containing any combination of `'FINGER'`, `'IRIS'`, and `'FACE'`. Empty on Web.
+</ResponseField>
+
+---
+
+## `isDevicePasscodeSet`
+
+```typescript
+CryptoApi.isDevicePasscodeSet(): Promise<DevicePasscodeResponse>
+```
+
+Returns whether a device-level passcode (PIN, pattern, or password) is configured. A passcode is a prerequisite for hardware-backed key storage on both iOS and Android; keys cannot be created with biometric protection unless a passcode fallback exists. On Web this always resolves to `{ isDevicePasscodeSet: false }`.
+
+### Response
+
+<ResponseField name="isDevicePasscodeSet" type="boolean">
+  `true` when a device PIN, pattern, or password is set.
+</ResponseField>
+
+---
+
+## Platform Notes
+
+<Tabs>
+  <Tab title="iOS">
+    - `isBiometricsEnabled` and `getBiometricsStatus` use `LAContext.canEvaluatePolicy` under the hood.
+    - `getAvailableHardware` reports `'FACE'` on Face ID devices and `'FINGER'` on Touch ID devices.
+    - `isDevicePasscodeSet` checks device passcode policy via `LAContext`.
+  </Tab>
+  <Tab title="Android">
+    - Methods delegate to `BiometricManager` from the AndroidX Biometric library.
+    - `BiometryType` maps to `BiometricManager.Authenticators` constants: `BIOMETRIC_STRONG`, `DEVICE_CREDENTIAL`, or a bitwise OR of both.
+    - `getAvailableHardware` reports each sensor class separately; a device with both a fingerprint reader and an IR face camera returns `['FINGER', 'FACE']`.
+  </Tab>
+  <Tab title="Web">
+    All biometrics methods are stubs on the Web platform. `isBiometricsEnabled` returns `false`, `getBiometricsStatus` returns `'UNKNOWN'`, `getAvailableHardware` returns `[]`, and `isDevicePasscodeSet` returns `false`.
+  </Tab>
+</Tabs>
+
+---
+
+## TypeScript Example
+
+The following example shows a complete pre-flight check that verifies biometric readiness before generating a hardware-backed key pair.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+import type { BiometryType, BiometricsHardware } from '@perfood/capacitor-crypto-api';
+
+async function checkBiometricReadiness(): Promise<void> {
+  const biometryType: BiometryType = 'BIOMETRY_OR_PASSCODE';
+
+  // 1. Check whether a passcode is configured (required for secure key storage).
+  const { isDevicePasscodeSet } = await CryptoApi.isDevicePasscodeSet();
+  if (!isDevicePasscodeSet) {
+    console.warn('No device passcode is set. Secure key storage may be unavailable.');
+    return;
+  }
+
+  // 2. Enumerate physical biometric hardware.
+  const { hardware } = await CryptoApi.getAvailableHardware();
+  const hardwareList: BiometricsHardware[] = hardware;
+  console.log('Available biometric hardware:', hardwareList);
+  // e.g. ['FINGER', 'FACE']
+
+  // 3. Get the detailed status for the desired biometry type.
+  const { status } = await CryptoApi.getBiometricsStatus({ type: biometryType });
+  console.log('Biometrics status:', status);
+
+  if (status === 'NONE_ENROLLED') {
+    console.warn('Biometric hardware is present but no credentials are enrolled.');
+    return;
+  }
+
+  if (status === 'HARDWARE_UNAVAILABLE') {
+    console.warn('Biometric hardware is unavailable on this device.');
+    return;
+  }
+
+  // 4. Quick boolean check before proceeding.
+  const { isEnabled } = await CryptoApi.isBiometricsEnabled({ type: biometryType });
+  if (!isEnabled) {
+    console.warn('Biometrics are not enabled for type:', biometryType);
+    return;
+  }
+
+  // 5. All checks passed — safe to generate a biometry-protected key.
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: 'com.example.app.auth',
+    algorithm: 'ecdsa',
+    type: biometryType,
+  });
+
+  console.log('Hardware-backed public key:', publicKey);
+}
+```
+
+<Note>
+  Always call `isDevicePasscodeSet` before attempting to generate a biometry-protected key. On Android, key generation with a `BiometryType` will fail at runtime if no device credential is configured.
+</Note>

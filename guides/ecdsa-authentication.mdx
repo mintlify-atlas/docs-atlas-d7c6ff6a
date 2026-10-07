@@ -1,0 +1,263 @@
+---
+title: "Cryptographic Authentication with ECDSA Signing"
+sidebarTitle: "ECDSA Auth"
+description: "Build hardware-backed challenge-response authentication: generate an ECDSA key pair, register the public key on a server, request a challenge, sign it, and verify the signature."
+---
+
+Cryptographic authentication with ECDSA lets your app prove user identity without ever transmitting a password. The private key is generated once inside the device's secure hardware — the iOS Secure Enclave or Android StrongBox/TEE — and never leaves it. The server stores only the corresponding public key and can verify any signature the device produces, making key exfiltration attacks impossible even if the device is compromised at the OS level.
+
+## How the flow works
+
+<CardGroup cols={2}>
+  <Card title="Key generation" icon="key">
+    The client generates an ECDSA P-256 key pair in secure hardware and sends the public key to the server for registration.
+  </Card>
+  <Card title="Challenge issuance" icon="shield-halved">
+    When the user wants to authenticate, the server generates a one-time cryptographic challenge and sends it to the client.
+  </Card>
+  <Card title="Signing" icon="pen-nib">
+    The client signs the challenge using the hardware-protected private key. Biometrics can gate this operation.
+  </Card>
+  <Card title="Verification" icon="circle-check">
+    The server verifies the signature against the stored public key. A valid signature proves device possession.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+Install the plugin and sync native projects before following this guide.
+
+```bash
+npm install @perfood/capacitor-crypto-api
+npx cap sync
+```
+
+## Full authentication walkthrough
+
+<Steps>
+
+### Generate an ECDSA key pair
+
+Call `generateKey` with `algorithm: 'ecdsa'` and a unique tag that identifies this credential on the device. The plugin returns the SPKI-encoded public key as a base64 string. The private key is created inside secure hardware and is never returned.
+
+If a key with the same tag already exists, `generateKey` returns the existing public key rather than overwriting it — so it is safe to call this on every app launch to ensure the credential exists.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.app.auth';
+
+async function generateAuthKey(): Promise<string> {
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: TAG,
+    algorithm: 'ecdsa',
+  });
+
+  if (!publicKey) {
+    throw new Error('Key generation failed — secure hardware may be unavailable.');
+  }
+
+  return publicKey;
+}
+```
+
+<Note>
+  The `tag` is an arbitrary unique string used to retrieve the key later. Use a reverse-DNS style identifier (e.g. `com.example.app.auth`) to avoid collisions with other plugins or apps.
+</Note>
+
+### Register the public key on the server
+
+Send the base64-encoded public key to your backend along with whatever user identifier your app uses. Your server should store this public key associated with the user account so it can verify signatures later.
+
+```typescript
+async function registerPublicKey(userId: string, publicKey: string): Promise<void> {
+  const response = await fetch('https://api.example.com/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, publicKey }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Registration failed: ${response.statusText}`);
+  }
+}
+```
+
+<Tip>
+  The public key is in SPKI format (SubjectPublicKeyInfo), which most server-side cryptography libraries — Node.js `crypto`, Java, Python `cryptography` — can import directly without any transformation.
+</Tip>
+
+### Request a challenge from the server
+
+Before signing, fetch a fresh, unpredictable challenge from your server. The challenge must be single-use and time-limited to prevent replay attacks.
+
+```typescript
+async function getChallenge(userId: string): Promise<string> {
+  const response = await fetch('https://api.example.com/auth/challenge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch challenge: ${response.statusText}`);
+  }
+
+  const { challenge } = await response.json();
+  return challenge as string;
+}
+```
+
+### Sign the challenge
+
+Pass the challenge string and the key tag to `CryptoApi.sign`. The plugin uses the private key identified by `tag` to produce an ASN.1 DER-encoded ECDSA signature, returned as a base64 string.
+
+```typescript
+async function signChallenge(challenge: string): Promise<string> {
+  const { signature } = await CryptoApi.sign({
+    tag: TAG,
+    data: challenge,
+  });
+
+  if (!signature) {
+    throw new Error('Signing failed — the key may have been deleted.');
+  }
+
+  return signature;
+}
+```
+
+<Note>
+  To require biometric confirmation before signing, pass a `type` field: `type: 'BIOMETRY'`, `'BIOMETRY_OR_PASSCODE'`, or `'PASSCODE'`. When set, the native biometrics prompt is displayed before the signing operation proceeds. See the [Biometrics guide](/guides/biometrics) for details.
+</Note>
+
+### Send the signature to the server for verification
+
+Submit the original challenge and the signature back to your server. The server verifies the signature using the stored public key.
+
+```typescript
+async function verifyWithServer(challenge: string, signature: string): Promise<boolean> {
+  const response = await fetch('https://api.example.com/auth/response', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challenge, signature }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Verification request failed: ${response.statusText}`);
+  }
+
+  const { verified } = await response.json();
+  return verified as boolean;
+}
+```
+
+### (Optional) Verify locally on the client
+
+For development and testing you can also verify signatures client-side using `CryptoApi.verify`. Pass the signer's public key, the original data, and the signature.
+
+```typescript
+async function verifyLocally(
+  foreignPublicKey: string,
+  data: string,
+  signature: string,
+): Promise<boolean> {
+  const { verified } = await CryptoApi.verify({
+    foreignPublicKey,
+    data,
+    signature,
+  });
+
+  return verified;
+}
+```
+
+<Warning>
+  Client-side verification is useful for testing but does not replace server-side verification in production. Always verify signatures on a trusted server before granting access.
+</Warning>
+
+</Steps>
+
+## Putting it all together
+
+The snippet below combines every step into a single `authenticate` function you can call from a login screen.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.app.auth';
+const API = 'https://api.example.com/auth';
+
+async function register(userId: string): Promise<void> {
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: TAG,
+    algorithm: 'ecdsa',
+  });
+
+  if (!publicKey) throw new Error('Key generation failed');
+
+  await fetch(`${API}/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, publicKey }),
+  });
+}
+
+async function authenticate(userId: string): Promise<boolean> {
+  // 1. Get challenge from server
+  const challengeRes = await fetch(`${API}/challenge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+  const { challenge } = await challengeRes.json();
+
+  // 2. Sign the challenge on device
+  const { signature } = await CryptoApi.sign({
+    tag: TAG,
+    data: challenge,
+    type: 'BIOMETRY_OR_PASSCODE', // optional: require biometrics
+  });
+
+  if (!signature) throw new Error('Signing failed');
+
+  // 3. Send signature to server
+  const verifyRes = await fetch(`${API}/response`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challenge, signature }),
+  });
+  const { verified } = await verifyRes.json();
+
+  return verified;
+}
+```
+
+## Managing keys
+
+```typescript
+// Load the existing public key (returns undefined if key doesn't exist)
+const { publicKey } = await CryptoApi.loadKey({
+  tag: TAG,
+  algorithm: 'ecdsa',
+});
+
+// List all ECDSA key tags stored on this device
+const { tags } = await CryptoApi.getECDSATags();
+
+// Delete the key (e.g. on logout or account deletion)
+await CryptoApi.deleteKey({
+  tag: TAG,
+  algorithm: 'ecdsa',
+});
+```
+
+<Warning>
+  Deleting a key is irreversible. The private key is permanently removed from secure hardware. Make sure to remove the corresponding public key from your server when you call `deleteKey`.
+</Warning>
+
+## Signature format note
+
+The native platforms (iOS Secure Enclave and Android StrongBox/TEE) return signatures in **ASN.1 DER** format, while the Web implementation using WebCrypto produces **IEEE P1363** (raw) format. Both are represented as base64 strings in the API.
+
+If your server-side verification library expects a specific format, use the `derToP1363` and `p1363ToDer` utilities from this package to convert between them. See the [Signature Formats guide](/guides/signature-formats) for a full explanation.

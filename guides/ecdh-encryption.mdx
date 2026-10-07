@@ -1,0 +1,253 @@
+---
+title: "End-to-End Encryption with ECDH Key Agreement"
+sidebarTitle: "ECDH Encryption"
+description: "Exchange ECDH public keys, derive a shared AES-GCM secret in secure hardware, and encrypt or decrypt messages — all without exposing the private key."
+---
+
+Elliptic Curve Diffie-Hellman (ECDH) lets two parties — typically a mobile client and a server — each generate a key pair and derive the exact same shared secret using only their own private key and the other party's public key. Neither side ever transmits the shared secret; it is derived independently on each end. The plugin then uses that secret as a 256-bit AES-GCM key to encrypt or decrypt arbitrary data, so the private key never leaves the device's Secure Enclave (iOS) or StrongBox/TEE (Android).
+
+## How ECDH key agreement works
+
+<CardGroup cols={2}>
+  <Card title="Key generation" icon="key">
+    Both parties independently generate ECDH P-256 key pairs. Each shares their public key with the other.
+  </Card>
+  <Card title="Shared secret derivation" icon="arrows-spin">
+    Using your private key and the other party's public key, both sides independently derive the identical AES-GCM secret — without ever transmitting it.
+  </Card>
+  <Card title="Encryption" icon="lock">
+    The sender encrypts plaintext with AES-GCM using the derived secret. The IV (initialization vector) is randomly generated and returned alongside the ciphertext.
+  </Card>
+  <Card title="Decryption" icon="lock-open">
+    The receiver uses their own private key and the sender's public key to re-derive the same secret, then decrypts the ciphertext using the IV.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+Install the plugin and sync native projects before following this guide.
+
+```bash
+npm install @perfood/capacitor-crypto-api
+npx cap sync
+```
+
+## Encryption walkthrough
+
+<Steps>
+
+### Generate an ECDH key pair on the client
+
+Call `generateKey` with `algorithm: 'ecdh'` to create a hardware-backed P-256 key pair. The plugin stores the private key in secure hardware and returns only the SPKI-encoded public key as a base64 string.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const CLIENT_TAG = 'com.example.app.ecdh.client';
+
+async function generateClientKey(): Promise<string> {
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: CLIENT_TAG,
+    algorithm: 'ecdh',
+  });
+
+  if (!publicKey) {
+    throw new Error('ECDH key generation failed.');
+  }
+
+  return publicKey;
+}
+```
+
+<Note>
+  Like ECDSA, calling `generateKey` with an existing tag returns the stored public key without replacing the key pair. This makes it safe to call on every app launch.
+</Note>
+
+### Exchange public keys with the server
+
+Send the client's public key to your server and receive the server's ECDH public key in return. Both keys are base64-encoded SPKI values.
+
+```typescript
+async function exchangePublicKeys(clientPublicKey: string): Promise<string> {
+  const response = await fetch('https://api.example.com/ecdh/exchange', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ publicKey: clientPublicKey }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Key exchange failed: ${response.statusText}`);
+  }
+
+  const { serverPublicKey } = await response.json();
+  return serverPublicKey as string;
+}
+```
+
+<Tip>
+  The server should generate its own ECDH P-256 key pair (e.g. using Node.js `crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' })`) and export the public key in SPKI/DER format encoded as base64.
+</Tip>
+
+### Encrypt data
+
+Call `CryptoApi.encrypt` with your key's `tag`, the server's public key (`foreignPublicKey`), and the plaintext string to encrypt. The plugin internally derives the ECDH shared secret and uses it as a 256-bit AES-GCM key with a randomly generated 12-byte IV.
+
+The call returns both the `iv` and `ciphertext` as base64 strings — you need both to decrypt later.
+
+```typescript
+async function encryptMessage(
+  plaintext: string,
+  serverPublicKey: string,
+): Promise<{ iv: string; ciphertext: string }> {
+  const { iv, ciphertext } = await CryptoApi.encrypt({
+    tag: CLIENT_TAG,
+    foreignPublicKey: serverPublicKey,
+    plaintext,
+  });
+
+  return { iv, ciphertext };
+}
+```
+
+<Warning>
+  Always store and transmit the `iv` alongside the `ciphertext`. The IV is not secret — it just must be unique per encryption. Without the correct IV, decryption will fail.
+</Warning>
+
+### Decrypt data
+
+Call `CryptoApi.decrypt` with the same `tag` and `foreignPublicKey` used during encryption, plus the `iv` and `ciphertext` values received from the other party.
+
+```typescript
+async function decryptMessage(
+  iv: string,
+  ciphertext: string,
+  serverPublicKey: string,
+): Promise<string> {
+  const { plaintext } = await CryptoApi.decrypt({
+    tag: CLIENT_TAG,
+    foreignPublicKey: serverPublicKey,
+    iv,
+    ciphertext,
+  });
+
+  return plaintext;
+}
+```
+
+<Note>
+  Decryption works because both sides independently derive the same AES-GCM key from the ECDH exchange. The client uses its private key + server's public key; the server uses its private key + client's public key — and the math guarantees they produce identical secrets.
+</Note>
+
+### Clean up keys when done
+
+Remove the key pair from secure hardware when it is no longer needed (e.g. user logs out or rotates keys).
+
+```typescript
+await CryptoApi.deleteKey({
+  tag: CLIENT_TAG,
+  algorithm: 'ecdh',
+});
+```
+
+</Steps>
+
+## Complete encrypt/decrypt example
+
+The snippet below shows a symmetric round-trip for testing: the client encrypts a message using its own public key as the `foreignPublicKey`, then decrypts it with the same tag. This only works because both operations use the same key pair — in production you would use the server's public key.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.app.ecdh';
+
+async function ecdhRoundTrip(): Promise<void> {
+  // 1. Generate key pair
+  const { publicKey } = await CryptoApi.generateKey({
+    tag: TAG,
+    algorithm: 'ecdh',
+  });
+
+  if (!publicKey) throw new Error('Key generation failed');
+
+  // 2. Encrypt using our own public key as the "foreign" key (self-test)
+  const plaintext = 'Hello, secure world!';
+  const { iv, ciphertext } = await CryptoApi.encrypt({
+    tag: TAG,
+    foreignPublicKey: publicKey,
+    plaintext,
+  });
+
+  console.log('Encrypted IV:', iv);
+  console.log('Encrypted ciphertext:', ciphertext);
+
+  // 3. Decrypt
+  const { plaintext: decrypted } = await CryptoApi.decrypt({
+    tag: TAG,
+    foreignPublicKey: publicKey,
+    iv,
+    ciphertext,
+  });
+
+  console.log('Decrypted:', decrypted); // → 'Hello, secure world!'
+}
+```
+
+## Using biometric protection
+
+You can require biometric verification before the private key is used for encryption or decryption by passing a `type` field:
+
+```typescript
+// Biometric-protected encryption
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: TAG,
+  foreignPublicKey: serverPublicKey,
+  plaintext: 'sensitive data',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+
+// Biometric-protected decryption
+const { plaintext } = await CryptoApi.decrypt({
+  tag: TAG,
+  foreignPublicKey: serverPublicKey,
+  iv,
+  ciphertext,
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+```
+
+The `type` field accepts `'BIOMETRY'`, `'BIOMETRY_OR_PASSCODE'`, or `'PASSCODE'`. When set, the native biometrics/passcode prompt appears before the cryptographic operation. See the [Biometrics guide](/guides/biometrics) for a full explanation of each option.
+
+## Managing ECDH keys
+
+```typescript
+// Load the existing ECDH public key
+const { publicKey } = await CryptoApi.loadKey({
+  tag: TAG,
+  algorithm: 'ecdh',
+});
+
+// List all ECDH key tags stored on this device
+const { tags } = await CryptoApi.getECDHTags();
+console.log('ECDH keys on device:', tags);
+
+// Delete a specific ECDH key pair
+await CryptoApi.deleteKey({
+  tag: TAG,
+  algorithm: 'ecdh',
+});
+```
+
+## Algorithm details
+
+| Property | Value |
+|---|---|
+| Key algorithm | ECDH P-256 (NIST curve) |
+| Key format (public) | SPKI, base64-encoded |
+| Symmetric cipher | AES-GCM |
+| AES key length | 256 bits |
+| IV length | 12 bytes (96 bits), randomly generated |
+| Web fallback | WebCrypto API (`SubtleCrypto.deriveKey`) |
+
+<Info>
+  On the web platform, key pairs are stored in `localStorage` as PKCS8 (private) and SPKI (public) base64 strings. WebCrypto is only available in secure contexts (`https://`). Private keys are never exposed outside the web implementation's internal `deriveKey` call.
+</Info>

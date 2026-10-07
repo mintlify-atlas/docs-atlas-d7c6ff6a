@@ -1,0 +1,262 @@
+---
+title: "Converting Between DER and P1363 Signature Formats"
+sidebarTitle: "Signature Formats"
+description: "Understand why iOS Secure Enclave and Android StrongBox return ASN.1 DER signatures while WebCrypto uses P1363, and how to convert between them with p1363ToDer and derToP1363."
+---
+
+ECDSA signatures can be encoded in two incompatible binary formats. iOS Secure Enclave and Android StrongBox/TEE produce signatures in **ASN.1 DER** format, while the browser's WebCrypto API (`SubtleCrypto.sign`) produces **IEEE P1363** (raw) format. Both are returned by the plugin as base64 strings, but a signature in one format will fail verification if the verifier expects the other. The `p1363ToDer` and `derToP1363` utilities let you convert between them without leaving JavaScript.
+
+## The two formats explained
+
+<CardGroup cols={2}>
+  <Card title="ASN.1 DER" icon="file-code">
+    Variable-length encoding. The signature is a SEQUENCE containing two INTEGER values (r and s). Used by OpenSSL, Java's `Signature` class, iOS/Android native APIs, and most TLS/X.509 tooling.
+  </Card>
+  <Card title="IEEE P1363 (raw)" icon="wave-square">
+    Fixed-length encoding. The signature is the raw concatenation of r and s, each zero-padded to 32 bytes (64 bytes total for P-256). Used by WebCrypto, JWT (ES256), and many modern web APIs.
+  </Card>
+</CardGroup>
+
+### DER structure
+
+A DER-encoded P-256 ECDSA signature looks like this in hex:
+
+```
+30 <total-length>
+  02 <r-length> <r-bytes...>
+  02 <s-length> <s-bytes...>
+```
+
+The lengths are variable: if the most-significant bit of `r` or `s` is set (i.e. the value would appear negative as a signed integer), a `00` padding byte is prepended, making the encoding 33 bytes for that component rather than 32.
+
+### P1363 structure
+
+A P1363-encoded P-256 ECDSA signature is exactly 64 bytes:
+
+```
+<r: 32 bytes, big-endian, zero-padded> <s: 32 bytes, big-endian, zero-padded>
+```
+
+## When you need to convert
+
+| Scenario | Required conversion |
+|---|---|
+| Native app signs data; server verifies with WebCrypto or JWT library (ES256) | DER → P1363 (`derToP1363`) |
+| Server signs with WebCrypto or JWT library; native app verifies | P1363 → DER (`p1363ToDer`) |
+| Web app signs with `CryptoApi.sign`; server verifies with OpenSSL/Java | No conversion needed — the web implementation already converts P1363 → DER internally |
+| You want to cross-verify: native signature verified by `CryptoApi.verify` on web | No conversion needed — `CryptoApi.verify` handles DER internally |
+
+<Note>
+  The plugin's own `CryptoApi.sign` and `CryptoApi.verify` methods handle format differences internally. You only need these utilities when you're passing signatures to **external** systems (your server, a third-party library, etc.) that expect a specific format.
+</Note>
+
+## Utility functions
+
+Both utilities are exported directly from `@perfood/capacitor-crypto-api` and work in any JavaScript environment — no native bridge call required.
+
+### `p1363ToDer(sig: Uint8Array): Uint8Array`
+
+Converts a raw IEEE P1363 signature (64-byte `Uint8Array`) to an ASN.1 DER-encoded `Uint8Array`.
+
+```typescript
+import { p1363ToDer } from '@perfood/capacitor-crypto-api';
+
+// sig is a 64-byte Uint8Array from WebCrypto's SubtleCrypto.sign
+const derSignature: Uint8Array = p1363ToDer(sig);
+```
+
+The function:
+1. Splits the input into `r` (first 32 bytes) and `s` (last 32 bytes).
+2. Strips leading `00` bytes from each.
+3. Prepends `00` if the high bit of the first byte is set (ASN.1 sign-bit rule).
+4. Wraps in `02 <length>` INTEGER TLV encoding.
+5. Wraps both in a `30 <length>` SEQUENCE TLV.
+
+### `derToP1363(sig: Uint8Array): Uint8Array`
+
+Converts an ASN.1 DER-encoded ECDSA signature to a raw IEEE P1363 `Uint8Array`.
+
+```typescript
+import { derToP1363 } from '@perfood/capacitor-crypto-api';
+
+// sig is a variable-length Uint8Array from iOS/Android native signing
+const p1363Signature: Uint8Array = derToP1363(sig);
+```
+
+The function:
+1. Parses the SEQUENCE and two INTEGER fields from the DER bytes.
+2. Extracts `r` and `s`, stripping any leading `00` padding.
+3. Left-pads each to exactly 32 bytes.
+4. Concatenates into a 64-byte P1363 signature.
+
+## Helper utilities
+
+The package also exports base64/ArrayBuffer helpers used alongside the conversion functions:
+
+### `base64ToArrayBuffer(base64: string): Uint8Array`
+
+Decodes a base64 string to a `Uint8Array`. Use this to convert the base64 signatures returned by `CryptoApi.sign` into binary before calling `derToP1363`.
+
+```typescript
+import { base64ToArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+const signatureBytes: Uint8Array = base64ToArrayBuffer(base64Signature);
+```
+
+### `arrayBufferToBase64(arrayBuffer: ArrayBuffer): string`
+
+Encodes an `ArrayBuffer` or the buffer of a `Uint8Array` to a base64 string. Use this after conversion to produce a string you can send over the network.
+
+```typescript
+import { arrayBufferToBase64, toArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+const base64: string = arrayBufferToBase64(toArrayBuffer(convertedSignature));
+```
+
+### `toArrayBuffer(data: Uint8Array): ArrayBuffer`
+
+Converts a `Uint8Array` to a plain `ArrayBuffer`. Required when passing data to WebCrypto APIs that expect `ArrayBuffer`.
+
+```typescript
+import { toArrayBuffer } from '@perfood/capacitor-crypto-api';
+
+const buffer: ArrayBuffer = toArrayBuffer(uint8Array);
+```
+
+## End-to-end examples
+
+### Verifying a native DER signature with the WebCrypto API
+
+A native app signs data and sends the DER signature (base64) to a web page or Node.js backend that uses WebCrypto directly.
+
+```typescript
+import {
+  base64ToArrayBuffer,
+  derToP1363,
+  toArrayBuffer,
+  arrayBufferToBase64,
+} from '@perfood/capacitor-crypto-api';
+
+/**
+ * Verify an ASN.1 DER signature (from iOS/Android) using the WebCrypto API.
+ * publicKeySpkiBase64: base64-encoded SPKI public key
+ * dataString: the original signed string
+ * derSignatureBase64: base64-encoded DER signature from CryptoApi.sign
+ */
+async function verifyDerSignatureWithWebCrypto(
+  publicKeySpkiBase64: string,
+  dataString: string,
+  derSignatureBase64: string,
+): Promise<boolean> {
+  // 1. Decode the base64 DER signature to bytes
+  const derBytes = base64ToArrayBuffer(derSignatureBase64);
+
+  // 2. Convert DER → P1363 (raw) for WebCrypto
+  const p1363Bytes = derToP1363(derBytes);
+
+  // 3. Import the SPKI public key
+  const publicKey = await crypto.subtle.importKey(
+    'spki',
+    toArrayBuffer(base64ToArrayBuffer(publicKeySpkiBase64)),
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['verify'],
+  );
+
+  // 4. Encode the original data string as UTF-8 bytes
+  const dataBytes = new TextEncoder().encode(dataString);
+
+  // 5. Verify with WebCrypto (expects P1363 format)
+  const verified = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
+    publicKey,
+    toArrayBuffer(p1363Bytes),
+    dataBytes,
+  );
+
+  return verified;
+}
+```
+
+### Converting a WebCrypto P1363 signature to DER for a server
+
+A web client signs data with the WebCrypto API and needs to send the signature to a backend that uses OpenSSL or Java's `Signature` class, which expect DER format.
+
+```typescript
+import {
+  p1363ToDer,
+  toArrayBuffer,
+  arrayBufferToBase64,
+  base64ToArrayBuffer,
+} from '@perfood/capacitor-crypto-api';
+
+/**
+ * Sign data with WebCrypto and convert the P1363 output to DER for a server.
+ */
+async function signAndConvertToDer(
+  privateKey: CryptoKey,
+  dataString: string,
+): Promise<string> {
+  const dataBytes = new TextEncoder().encode(dataString);
+
+  // WebCrypto produces P1363 (raw) format
+  const p1363Buffer = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
+    privateKey,
+    dataBytes,
+  );
+
+  // Convert P1363 → DER
+  const derBytes = p1363ToDer(new Uint8Array(p1363Buffer));
+
+  // Encode as base64 for transmission
+  return arrayBufferToBase64(toArrayBuffer(derBytes));
+}
+```
+
+### Using `CryptoApi.sign` output with a Node.js crypto verifier
+
+`CryptoApi.sign` returns a base64-encoded DER signature on native platforms. On the server side, Node.js `crypto.verify` accepts DER natively — no conversion needed there. But if the server uses a JWT library expecting P1363/ES256, you need to convert:
+
+```typescript
+import {
+  CryptoApi,
+  base64ToArrayBuffer,
+  derToP1363,
+  toArrayBuffer,
+  arrayBufferToBase64,
+} from '@perfood/capacitor-crypto-api';
+
+async function signForJwt(tag: string, payload: string): Promise<string> {
+  // 1. Sign with the native key — returns DER base64 on iOS/Android
+  const { signature: derBase64 } = await CryptoApi.sign({
+    tag,
+    data: payload,
+  });
+
+  if (!derBase64) throw new Error('Signing failed');
+
+  // 2. Convert DER → P1363 for JWT (ES256 uses P1363)
+  const derBytes = base64ToArrayBuffer(derBase64);
+  const p1363Bytes = derToP1363(derBytes);
+
+  // 3. Encode as base64url (replace + → -, / → _, strip =)
+  const base64 = arrayBufferToBase64(toArrayBuffer(p1363Bytes));
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+```
+
+## Quick reference
+
+<CardGroup cols={2}>
+  <Card title="DER → P1363" icon="arrow-right">
+    Use `derToP1363` when a native DER signature needs to be verified by WebCrypto or a JWT ES256 library.
+  </Card>
+  <Card title="P1363 → DER" icon="arrow-left">
+    Use `p1363ToDer` when a WebCrypto P1363 signature needs to be verified by OpenSSL, Java, or another ASN.1-aware library.
+  </Card>
+</CardGroup>
+
+<Tip>
+  If you use `CryptoApi.verify` to verify signatures within your app, no conversion is needed — the plugin handles both formats internally across all platforms.
+</Tip>

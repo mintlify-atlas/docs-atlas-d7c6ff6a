@@ -1,0 +1,314 @@
+---
+title: "Android Platform: StrongBox and TEE Key Storage"
+sidebarTitle: "Android"
+description: "How the plugin uses Android StrongBox and TEE for hardware-backed EC key storage, BiometricManager authenticator types, ECDH support requirements, and passkey integration."
+---
+
+The Android implementation of `@perfood/capacitor-crypto-api` stores all private keys inside the **Android Keystore** and targets the strongest available hardware on the device. When a **StrongBox** security chip (a discrete, tamper-resistant co-processor) is present the plugin directs key generation there. If StrongBox is unavailable it falls back to the device's **Trusted Execution Environment (TEE)** — a hardware-isolated execution environment present on virtually all Android devices shipping with API level 23 or higher.
+
+<Note>
+  The minimum supported Android API level is **23** (Android 6.0 Marshmallow). ECDH key agreement requires **API level 31** (Android 12). Passkeys require **API level 28** (Android 9) via the Credential Manager API.
+</Note>
+
+## StrongBox vs TEE
+
+Both storage backends protect private key material in hardware, but there are important differences:
+
+<CardGroup cols={2}>
+  <Card title="StrongBox" icon="shield-halved">
+    A dedicated security chip (e.g., Titan M on Pixel devices). Key operations happen entirely inside the chip. Available on devices running **API 28+** that declare `FEATURE_STRONGBOX_KEYSTORE`. `hasSecureHardware()` returns `true` only when StrongBox is present.
+  </Card>
+  <Card title="Trusted Execution Environment (TEE)" icon="microchip">
+    A hardware-isolated partition of the main CPU. Less tamper-resistant than StrongBox, but still protects keys from the normal OS. Used as a fallback when StrongBox is unavailable or when a `StrongBoxUnavailableException` is thrown during key generation.
+  </Card>
+</CardGroup>
+
+### How the plugin selects the backend
+
+When `generateKey` is called, the plugin:
+
+1. Calls `hasSecureHardware()` to check for `FEATURE_STRONGBOX_KEYSTORE`.
+2. If StrongBox is available, sets `setIsStrongBoxBacked(true)` and attempts key generation.
+3. If a `StrongBoxUnavailableException` is thrown, retries with `setIsStrongBoxBacked(false)` to use the TEE.
+4. After generation, reads `KeyInfo.isInsideSecureHardware()` and **deletes** the key if it is not hardware-backed, returning `null` for ECDSA keys.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Returns true only if FEATURE_STRONGBOX_KEYSTORE is present (API 28+)
+const { hasSecureHardware } = await CryptoApi.hasSecureHardware();
+```
+
+<Warning>
+  On devices without StrongBox **or** TEE (software-only Keystore), `generateKey` for ECDSA returns `null` because the `isInsideSecureHardware` check fails. Always check the return value before proceeding.
+</Warning>
+
+## Key management
+
+### Key aliases in the Android Keystore
+
+Android does not use a separate tag field like iOS. Instead, the plugin builds a Keystore alias by concatenating a fixed label with your `tag`:
+
+| Algorithm | Keystore alias format   | Example alias                     |
+|-----------|-------------------------|-----------------------------------|
+| `ecdsa`   | `CryptoApiECDSA:<tag>`  | `CryptoApiECDSA:com.example.auth` |
+| `ecdh`    | `CryptoApiECDH:<tag>`   | `CryptoApiECDH:com.example.enc`   |
+
+`getECDSATags()` and `getECDHTags()` enumerate all entries in the AndroidKeyStore that start with the respective label prefix and strip it before returning the tags.
+
+### Generating a key pair
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Generate an ECDSA key pair (secp256r1, SHA-256 digest)
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.auth-key',
+  algorithm: 'ecdsa',
+});
+
+// Generate an ECDH key pair — requires API 31 (Android 12)
+const { publicKey: ecdhPublicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.ecdh-key',
+  algorithm: 'ecdh',
+});
+```
+
+<Info>
+  `generateKey` is idempotent: if a key with the same `tag` and `algorithm` already exists in the Keystore it returns the existing public key without creating a new entry.
+</Info>
+
+### Biometry-protected keys
+
+When the optional `type` parameter is provided, the plugin sets `setUserAuthenticationRequired(true)` and maps `BiometryType` to `KeyProperties` authentication flags. The key is authorized for **5 seconds** after a successful authentication.
+
+| `BiometryType`         | `KeyProperties` flags                                          |
+|------------------------|----------------------------------------------------------------|
+| `BIOMETRY`             | `AUTH_BIOMETRIC_STRONG`                                        |
+| `BIOMETRY_OR_PASSCODE` | `AUTH_BIOMETRIC_STRONG \| AUTH_DEVICE_CREDENTIAL`             |
+| `PASSCODE`             | `AUTH_DEVICE_CREDENTIAL`                                       |
+
+Additionally, `setInvalidatedByBiometricEnrollment(true)` is set so that adding a new fingerprint or face invalidates the key.
+
+```typescript
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.biometric-key',
+  algorithm: 'ecdsa',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+```
+
+## Signing and verification
+
+Android signs with `Signature.getInstance("SHA256withECDSA")` using the hardware-backed private key. The signature is returned in **ASN.1 DER** format, base64-encoded (matching iOS behavior).
+
+### Automatic biometry prompt for protected keys
+
+When you call `sign`, `encrypt`, or `decrypt` on a biometry-protected key, the initial attempt throws a `UserNotAuthenticatedException` (a subclass of `InvalidKeyException`). The plugin catches this and automatically presents a `BiometricPrompt`:
+
+<Steps>
+  <Step title="First attempt">
+    The plugin calls the crypto operation directly. For keys without biometry protection this succeeds immediately.
+  </Step>
+  <Step title="Authentication prompt (biometry-protected keys only)">
+    On `InvalidKeyException`, the plugin calls `BiometryApi.authenticate()` with the appropriate `BiometricManager.Authenticators` constant, which shows the system biometrics dialog.
+  </Step>
+  <Step title="Second attempt after success">
+    After successful authentication the key is authorized for 5 seconds and the operation is retried automatically.
+  </Step>
+  <Step title="Error propagation">
+    If the user cancels or too many attempts fail, the promise rejects with `user_cancelled` or `lockout` respectively.
+  </Step>
+</Steps>
+
+```typescript
+try {
+  const { signature } = await CryptoApi.sign({
+    tag: 'com.example.biometric-key',
+    data: serverChallenge,
+    type: 'BIOMETRY',
+  });
+} catch (err: any) {
+  if (err.message === 'user_cancelled') {
+    // User dismissed the biometric prompt
+  } else if (err.message === 'lockout') {
+    // Too many failed attempts — prompt user to use passcode
+  }
+}
+```
+
+### Verification
+
+Verification uses the foreign party's public key directly and does not require any hardware-backed key material:
+
+```typescript
+const { verified } = await CryptoApi.verify({
+  foreignPublicKey: serverPublicKeyBase64,
+  data: challenge,
+  signature: signatureBase64,
+});
+```
+
+## Encryption and decryption
+
+The plugin derives a shared secret with `KeyAgreement.getInstance("ECDH")`, truncates to 32 bytes (256-bit AES key), then encrypts with `AES/GCM/NoPadding` using a 12-byte random IV and a 128-bit GCM authentication tag.
+
+```typescript
+// Encrypt
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: 'com.example.ecdh-key',
+  foreignPublicKey: remotePartyPublicKey,
+  plaintext: 'Confidential payload',
+});
+
+// Decrypt
+const { plaintext } = await CryptoApi.decrypt({
+  tag: 'com.example.ecdh-key',
+  foreignPublicKey: remotePartyPublicKey,
+  iv,
+  ciphertext,
+});
+```
+
+<Warning>
+  ECDH (`PURPOSE_AGREE_KEY`) requires **API level 31**. On API 23–30, `generateKey` with `algorithm: 'ecdh'` returns `null` and encrypt/decrypt will fail. Check `Build.VERSION.SDK_INT` or guard with `hasSecureHardware()` plus API-level detection in your app.
+</Warning>
+
+## Biometrics
+
+The Android biometry layer is built on `androidx.biometric.BiometricManager` and `BiometricPrompt`. The `type` parameter maps to `BiometricManager.Authenticators` constants used in `canAuthenticate()` checks:
+
+| `BiometryType`         | `BiometricManager.Authenticators`                         |
+|------------------------|-----------------------------------------------------------|
+| `BIOMETRY`             | `BIOMETRIC_STRONG`                                        |
+| `BIOMETRY_OR_PASSCODE` | `BIOMETRIC_STRONG \| DEVICE_CREDENTIAL`                  |
+| `PASSCODE`             | `DEVICE_CREDENTIAL`                                       |
+
+```typescript
+// Check if strong biometry is enrolled and working
+const { isEnabled } = await CryptoApi.isBiometricsEnabled({ type: 'BIOMETRY' });
+
+// Get a detailed status
+const { status } = await CryptoApi.getBiometricsStatus({ type: 'BIOMETRY' });
+// 'SUCCESS' | 'HARDWARE_UNAVAILABLE' | 'NONE_ENROLLED' | 'UNKNOWN'
+
+// Enumerate hardware — Android can report FINGER, IRIS, and FACE
+const { hardware } = await CryptoApi.getAvailableHardware();
+
+// Detect passcode (calls KeyguardManager.isDeviceSecure — API 23+)
+const { isDevicePasscodeSet } = await CryptoApi.isDevicePasscodeSet();
+```
+
+`getAvailableHardware` checks `PackageManager` system features for fingerprint, iris (including Samsung's `com.samsung.android.server.iris`), and face (including Samsung's `com.samsung.android.bio.face.service`) to return a subset of `['FINGER', 'IRIS', 'FACE']`.
+
+<Accordion title="BiometricsStatus values on Android">
+| Status | `BiometricManager` constant | Meaning |
+|---|---|---|
+| `SUCCESS` | `BIOMETRIC_SUCCESS` | Biometry is enrolled and ready |
+| `HARDWARE_UNAVAILABLE` | `BIOMETRIC_ERROR_NO_HARDWARE` or `BIOMETRIC_ERROR_HW_UNAVAILABLE` | No biometry hardware or hardware is busy |
+| `NONE_ENROLLED` | `BIOMETRIC_ERROR_NONE_ENROLLED` | Hardware present but no biometrics enrolled |
+| `UNKNOWN` | Any other result | Indeterminate state |
+</Accordion>
+
+## Passkeys (WebAuthn / FIDO2)
+
+Passkey support on Android is implemented via `PasskeyApi.java` using the **Credential Manager** API (`androidx.credentials`). Like iOS, all fields in the result are base64url-encoded strings.
+
+<Warning>
+  Passkeys require **API level 28** and the `com.google.android.gms:play-services-auth` dependency. A valid **Digital Asset Links** file at `https://your-domain.com/.well-known/assetlinks.json` is required to bind your app to the relying party.
+</Warning>
+
+<Steps>
+  <Step title="Configure Digital Asset Links">
+    Host a valid `assetlinks.json` file and declare `android:name="asset_statements"` in your `AndroidManifest.xml` so the OS can verify your app owns `rpId`.
+  </Step>
+  <Step title="Register a passkey">
+    ```typescript
+    const result = await CryptoApi.registerPasskey({
+      challenge: serverChallenge,         // base64url string
+      rp: { id: 'your-domain.com', name: 'My App' },
+      user: {
+        id: userId,                       // base64url string
+        name: 'user@example.com',
+        displayName: 'Alice',
+      },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      authenticatorSelection: {
+        residentKey: 'required',
+        userVerification: 'preferred',
+      },
+      extensions: { credProps: true },
+    });
+    // Send result.response.attestationObject and result.response.clientDataJSON to your server
+    ```
+  </Step>
+  <Step title="Authenticate with a passkey">
+    ```typescript
+    const result = await CryptoApi.authenticateWithPasskey({
+      rpId: 'your-domain.com',
+      challenge: serverChallenge,
+      allowCredentials: [{ type: 'public-key', id: credentialId }],
+      userVerification: 'required',
+    });
+    // Verify result.response.signature and result.response.authenticatorData on your server
+    ```
+  </Step>
+</Steps>
+
+## Full ECDSA authentication flow
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.user-auth';
+
+// 1. Generate key pair — idempotent, safe to call on every app start
+const { publicKey } = await CryptoApi.generateKey({
+  tag: TAG,
+  algorithm: 'ecdsa',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+
+if (!publicKey) {
+  throw new Error('Secure hardware unavailable or API level too low');
+}
+
+// 2. Register publicKey with your server
+await fetch('/api/register', {
+  method: 'POST',
+  body: JSON.stringify({ publicKey }),
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// 3. At login: fetch challenge, sign, verify
+const { challenge } = await fetch('/api/challenge').then(r => r.json());
+
+const { signature } = await CryptoApi.sign({
+  tag: TAG,
+  data: challenge,
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+
+const { verified } = await fetch('/api/verify', {
+  method: 'POST',
+  body: JSON.stringify({ challenge, signature }),
+  headers: { 'Content-Type': 'application/json' },
+}).then(r => r.json());
+```
+
+## Platform behaviour summary
+
+<CardGroup cols={2}>
+  <Card title="Key storage" icon="lock">
+    AndroidKeyStore with aliases `CryptoApiECDSA:<tag>` and `CryptoApiECDH:<tag>`. StrongBox is preferred; TEE is used as fallback.
+  </Card>
+  <Card title="Algorithm support" icon="code">
+    ECDSA (all API ≥ 23) and ECDH (API ≥ 31), both using secp256r1 (P-256) with SHA-256.
+  </Card>
+  <Card title="Signature format" icon="file-signature">
+    ASN.1 DER, base64-encoded — same as iOS. Use `derToP1363` if your server expects IEEE P1363 raw bytes.
+  </Card>
+  <Card title="hasSecureHardware" icon="microchip">
+    Returns `true` only when `FEATURE_STRONGBOX_KEYSTORE` is declared (API 28+). Returns `false` on devices with TEE-only storage.
+  </Card>
+</CardGroup>

@@ -1,0 +1,161 @@
+---
+title: "Install Capacitor Crypto API in Your Project"
+sidebarTitle: "Installation"
+description: "Install @perfood/capacitor-crypto-api via npm, sync native modules with Capacitor, and review iOS 14+ and Android API 23+ platform requirements."
+---
+
+Installing `@perfood/capacitor-crypto-api` follows the standard Capacitor plugin workflow: add the npm package, then run `npx cap sync` so Capacitor links the native iOS and Android modules into your Xcode and Android Studio projects. No manual native code changes are required for the core cryptographic API — the plugin registers itself automatically.
+
+## Requirements
+
+Review the platform requirements before installing so you can set minimum deployment targets accordingly.
+
+| Requirement | Value |
+|---|---|
+| Capacitor | **8.0.0 or later** (peer dependency) |
+| iOS deployment target | **iOS 14.0+** |
+| Android `minSdkVersion` | **API 23** (Android 6.0 Marshmallow) |
+| Passkey support — iOS | **iOS 16.0+** |
+| Passkey support — Android | **API 28** (Android 9.0 Pie) |
+| Web (development) | HTTPS origin required for WebCrypto |
+
+<Warning>
+  StrongBox-backed keys require a device that has a dedicated security chip. Devices without StrongBox fall back to the software-emulated Trusted Execution Environment (TEE). Call `CryptoApi.hasSecureHardware()` at runtime to check which is available.
+</Warning>
+
+## Install the package
+
+<Steps>
+  <Step title="Add the npm package">
+    Install `@perfood/capacitor-crypto-api` from the npm registry.
+
+    ```bash
+    npm install @perfood/capacitor-crypto-api
+    ```
+
+    The package ships pre-built CommonJS and ESM bundles, TypeScript type declarations, and native source trees for iOS and Android — no separate `@types` package is needed.
+  </Step>
+
+  <Step title="Sync native projects">
+    Run Capacitor's sync command to copy the plugin into your Xcode and Android Studio projects.
+
+    ```bash
+    npx cap sync
+    ```
+
+    `cap sync` performs both `cap copy` (bundles your web build) and `cap update` (installs/updates native plugins). You must re-run it every time you install or update a Capacitor plugin.
+  </Step>
+
+  <Step title="Verify iOS setup">
+    Open your Xcode project and confirm that **PerfoodCapacitorCryptoApi** appears under **Pods** in the project navigator. No additional `Info.plist` entries or entitlements are required for ECDSA/ECDH key operations.
+
+    <Note>
+      If your app uses biometric-gated keys (the `type` option on `generateKey`, `sign`, `encrypt`, or `decrypt`), you must add the **NSFaceIDUsageDescription** key to `ios/App/App/Info.plist` to explain why your app requests Face ID access.
+    </Note>
+
+    ```xml
+    <!-- ios/App/App/Info.plist -->
+    <key>NSFaceIDUsageDescription</key>
+    <string>Used to protect your cryptographic keys.</string>
+    ```
+  </Step>
+
+  <Step title="Verify Android setup">
+    Open `android/app/build.gradle` and confirm `minSdkVersion` is at least **23**.
+
+    ```groovy
+    android {
+        defaultConfig {
+            minSdkVersion 23
+            // ...
+        }
+    }
+    ```
+
+    The plugin adds the `USE_BIOMETRIC` and `USE_FINGERPRINT` permissions to the merged `AndroidManifest.xml` automatically via its own manifest. No manual permission declarations are needed for key operations.
+
+    <Note>
+      For passkey (WebAuthn) support, your app also needs an **Android App Link** (Digital Asset Links JSON file hosted at `https://yourdomain.com/.well-known/assetlinks.json`) so Android can associate your app with the relying party ID.
+    </Note>
+  </Step>
+</Steps>
+
+## Import the plugin
+
+Once installed and synced, import `CryptoApi` directly from the package in your TypeScript or JavaScript source files.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+```
+
+Utility functions and type definitions are also exported from the same package entry point.
+
+```typescript
+import {
+  CryptoApi,
+  p1363ToDer,
+  derToP1363,
+  base64ToArrayBuffer,
+  arrayBufferToBase64,
+  toArrayBuffer,
+} from '@perfood/capacitor-crypto-api';
+
+import type {
+  BiometryType,
+  BiometricsStatus,
+  BiometricsHardware,
+  GenerateKeyOptions,
+  SignOptions,
+  VerifyOptions,
+  EncryptOptions,
+  DecryptOptions,
+} from '@perfood/capacitor-crypto-api';
+```
+
+## Platform behaviour at a glance
+
+<Tabs>
+  <Tab title="iOS">
+    - Key pairs are created inside the **Secure Enclave** and never exported.
+    - Only **NIST P-256** keys are supported (enforced by the Secure Enclave).
+    - Biometric protection uses **LocalAuthentication** (Face ID / Touch ID).
+    - `hasSecureHardware()` always returns `true` on iOS.
+    - Passkeys use the **ASAuthorizationController** API (iOS 16+).
+  </Tab>
+  <Tab title="Android">
+    - Keys are stored in the **Android Keystore** backed by StrongBox (if available) or TEE.
+    - Call `hasSecureHardware()` to detect StrongBox vs TEE at runtime.
+    - Biometric protection uses **BiometricPrompt** with configurable authenticator types.
+    - `BiometryType` maps to `BiometricManager.Authenticators` constants:
+      - `'BIOMETRY'` → `BIOMETRIC_STRONG`
+      - `'BIOMETRY_OR_PASSCODE'` → `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`
+      - `'PASSCODE'` → `DEVICE_CREDENTIAL`
+    - Passkeys use the **Credential Manager** API (Android 9+).
+  </Tab>
+  <Tab title="Web">
+    - Backed by the **WebCrypto API** (`crypto.subtle`).
+    - Key pairs are serialised and stored in **`localStorage`** — not hardware-backed.
+    - Biometric methods return stub values (`isEnabled: false`, `status: 'UNKNOWN'`).
+    - `hasSecureHardware()` returns `false`.
+    - Requires an **HTTPS** origin — `http://localhost` will throw.
+    - Intended for **development and testing only**.
+  </Tab>
+</Tabs>
+
+## Troubleshooting
+
+<Accordion title="cap sync reports 'Plugin not found'">
+  Ensure the package is listed in `node_modules/@perfood/capacitor-crypto-api`. If you installed with `--legacy-peer-deps`, verify that your installed Capacitor core version satisfies `>=8.0.0`. Then delete `node_modules` and reinstall before re-running `npx cap sync`.
+</Accordion>
+
+<Accordion title="WebCrypto throws on localhost">
+  The Web implementation checks `window.location.protocol === 'https:'` before any `crypto.subtle` call. Run your dev server over HTTPS (e.g. `vite --https`) or use the [Capacitor live reload feature](https://capacitorjs.com/docs/guides/live-reload) on a real device to bypass this.
+</Accordion>
+
+<Accordion title="Android build fails with minSdkVersion error">
+  Set `minSdkVersion` to at least **23** in `android/app/build.gradle`. If you use a `local.properties`-driven override, check there too. Run `npx cap sync` again after changing the Gradle file.
+</Accordion>
+
+<Accordion title="Face ID prompt never appears on iOS">
+  Add `NSFaceIDUsageDescription` to `ios/App/App/Info.plist`. Without this key, iOS silently denies Face ID access and the sign/encrypt call may fail or fall back to passcode depending on your `type` option.
+</Accordion>

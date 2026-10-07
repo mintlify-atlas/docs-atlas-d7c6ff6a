@@ -1,0 +1,160 @@
+---
+title: "loadKey — Retrieve a Stored Public Key by Tag"
+sidebarTitle: "loadKey"
+description: "Retrieve the base64-encoded public key for an existing hardware-backed key pair by its tag and algorithm. Returns undefined if the key does not exist."
+---
+
+The `loadKey` method retrieves the public key for an existing key pair that was previously created with `generateKey`. It reads from the device's secure hardware — the iOS Secure Enclave, Android StrongBox/TEE, or the browser's `localStorage` in development — and returns the base64-encoded public key in SPKI format. If no key exists for the given tag and algorithm combination, `publicKey` will be `undefined`. This makes `loadKey` useful both for fetching a known key and for checking whether a key has already been provisioned on the device.
+
+## Signature
+
+```typescript
+CryptoApi.loadKey(options: LoadKeyOptions): Promise<LoadKeyResponse>
+```
+
+## Parameters
+
+<ParamField body="tag" type="string" required>
+  The unique string identifier for the key pair to retrieve. This must exactly
+  match the `tag` value that was passed to `generateKey` when the key was
+  originally created.
+</ParamField>
+
+<ParamField body="algorithm" type="'ecdsa' | 'ecdh'" required>
+  The elliptic curve algorithm that was used to create the key pair. You must
+  supply the same algorithm that was specified at generation time — ECDSA and
+  ECDH keys are stored separately even if they share the same tag.
+
+  - `"ecdsa"` — Retrieve an ECDSA signing key pair.
+  - `"ecdh"` — Retrieve an ECDH key agreement key pair.
+</ParamField>
+
+## Response
+
+<ResponseField name="publicKey" type="string | undefined">
+  The public key encoded as a **base64 string** in SPKI (SubjectPublicKeyInfo)
+  DER format. This is the same value that was returned when the key was first
+  generated with `generateKey`.
+
+  Returns `undefined` when no key pair matching the given `tag` and `algorithm`
+  exists in secure storage. This is the recommended way to check key existence
+  before provisioning.
+</ResponseField>
+
+## Examples
+
+<Tabs>
+  <Tab title="Load an Existing Key">
+    Retrieve a previously generated public key by its tag and algorithm.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    const { publicKey } = await CryptoApi.loadKey({
+      tag: 'com.myapp.user.auth',
+      algorithm: 'ecdsa',
+    });
+
+    if (publicKey) {
+      console.log('Loaded public key (base64 SPKI):', publicKey);
+    } else {
+      console.log('No key found for this tag — needs provisioning.');
+    }
+    ```
+  </Tab>
+  <Tab title="Check Before Generating">
+    Use `loadKey` to avoid overwriting an existing key pair. Only generate a new
+    key if none is present on the device.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    async function getOrCreateAuthKey(tag: string): Promise<string | undefined> {
+      // Try to load an existing key first
+      const { publicKey: existingKey } = await CryptoApi.loadKey({
+        tag,
+        algorithm: 'ecdsa',
+      });
+
+      if (existingKey) {
+        console.log('Using existing key:', existingKey);
+        return existingKey;
+      }
+
+      // No key found — generate a new one
+      console.log('No key found, generating a new one…');
+      const { publicKey: newKey } = await CryptoApi.generateKey({
+        tag,
+        algorithm: 'ecdsa',
+      });
+
+      return newKey;
+    }
+
+    const publicKey = await getOrCreateAuthKey('com.myapp.user.auth');
+    ```
+  </Tab>
+  <Tab title="Load an ECDH Key">
+    Retrieve an ECDH public key to share with a remote peer for key exchange.
+
+    ```typescript
+    import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+    const { publicKey } = await CryptoApi.loadKey({
+      tag: 'com.myapp.user.messaging',
+      algorithm: 'ecdh',
+    });
+
+    if (publicKey) {
+      // Share this public key with the remote peer to perform key agreement
+      await fetch('/api/exchange-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ publicKey }),
+      });
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Checking key existence
+
+A common pattern is to call `loadKey` at application startup to determine whether the user has already provisioned a key on this device. If `publicKey` is `undefined`, you know the device has not been enrolled and can guide the user through key generation.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+async function checkEnrollmentStatus(tag: string): Promise<'enrolled' | 'not-enrolled'> {
+  const { publicKey } = await CryptoApi.loadKey({
+    tag,
+    algorithm: 'ecdsa',
+  });
+
+  return publicKey ? 'enrolled' : 'not-enrolled';
+}
+```
+
+<Info>
+  `loadKey` only reads the public key from secure storage. It does **not**
+  trigger any biometric prompt, even if the key was generated with biometric
+  protection enabled. Biometric prompts are triggered only when the private key
+  is actively used — during `sign` or `decrypt` operations.
+</Info>
+
+## Platform behaviour
+
+<CardGroup cols={3}>
+  <Card title="iOS — Secure Enclave" icon="apple">
+    Retrieves the public key associated with the tag from the Secure Enclave
+    keychain. Returns `undefined` if no matching entry is found.
+  </Card>
+  <Card title="Android — StrongBox / TEE" icon="android">
+    Loads the public key from the Android Keystore. Returns `undefined` if the
+    key was never generated or has been deleted.
+  </Card>
+  <Card title="Web — WebCrypto API" icon="browser">
+    Reads the key from `localStorage`. Returns `undefined` if the entry is
+    absent or was cleared. Keys in `localStorage` do not survive a browser data
+    reset.
+  </Card>
+</CardGroup>

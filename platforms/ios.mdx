@@ -1,0 +1,293 @@
+---
+title: "iOS Platform: Secure Enclave Integration"
+sidebarTitle: "iOS"
+description: "How the plugin uses the iOS Secure Enclave for hardware-backed P-256 key storage, Face ID / Touch ID biometrics via LAPolicy, and platform passkeys via AuthenticationServices."
+---
+
+The iOS implementation of `@perfood/capacitor-crypto-api` stores every private key directly inside the **Secure Enclave** — a dedicated security co-processor present on all iPhones with Apple A7 or later. Private key material never leaves the enclave; all signing and key-agreement operations are performed inside it. The public API surface is identical to the Android and web implementations, so your TypeScript code runs without changes across all three platforms.
+
+<Note>
+  The minimum supported iOS version is **iOS 14**. Passkey registration and authentication require **iOS 16** and will return an `unsupported` error on older systems.
+</Note>
+
+## Secure Enclave fundamentals
+
+The Secure Enclave enforces two constraints that shape how the plugin works:
+
+- **P-256 only.** All keys are NIST secp256r1 (P-256) elliptic curve keys. No other curve or algorithm is accepted.
+- **Non-exportable private keys.** The private key is generated inside the enclave and bound to `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. It cannot be extracted, exported, or backed up — not even to iCloud Keychain.
+
+Both `ecdsa` and `ecdh` algorithms use P-256 keys stored in the Secure Enclave. iOS implements key lookup by combining a Keychain label (`CryptoApiECDSA` for ECDSA keys, `CryptoApiECDH` for ECDH keys) with an application tag that you supply as the `tag` parameter.
+
+### `hasSecureHardware` always returns `true`
+
+Because every supported iOS device ships with a Secure Enclave, the plugin unconditionally resolves `hasSecureHardware()` with `true`:
+
+```typescript
+// iOS — always true
+const { hasSecureHardware } = await CryptoApi.hasSecureHardware();
+console.log(hasSecureHardware); // true
+```
+
+## Key management
+
+### Generating a key pair
+
+`generateKey` first checks whether a key with the given `tag` and `algorithm` already exists. If so, it returns the existing public key rather than overwriting it. New keys are created with `SecKeyCreateRandomKey` targeting `kSecAttrTokenIDSecureEnclave`:
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Generate an ECDSA key pair — returns the DER-encoded public key in base64
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.auth-key',
+  algorithm: 'ecdsa',
+});
+
+// Generate an ECDH key pair for key agreement / encryption
+const { publicKey: ecdhPublicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.ecdh-key',
+  algorithm: 'ecdh',
+});
+```
+
+### Access control flags and biometry
+
+The optional `type` parameter on `generateKey`, `sign`, `encrypt`, and `decrypt` maps directly to `SecAccessControlCreateFlags` set at key creation time:
+
+| `BiometryType`        | `SecAccessControlCreateFlags`           | Behaviour                                           |
+|-----------------------|-----------------------------------------|-----------------------------------------------------|
+| *(omitted)*           | `.privateKeyUsage`                      | No user authentication required                     |
+| `BIOMETRY`            | `.privateKeyUsage` + `.biometryCurrentSet` | Requires the biometric set enrolled at creation time |
+| `BIOMETRY_OR_PASSCODE`| `.privateKeyUsage` + `.userPresence`    | Face ID / Touch ID, or device passcode as fallback  |
+| `PASSCODE`            | `.privateKeyUsage` + `.devicePasscode`  | Device passcode only                                |
+
+```typescript
+// Key locked to the current biometric enrollment
+const { publicKey } = await CryptoApi.generateKey({
+  tag: 'com.example.biometric-key',
+  algorithm: 'ecdsa',
+  type: 'BIOMETRY',
+});
+```
+
+<Warning>
+  If you use `BIOMETRY` (`.biometryCurrentSet`) and the user later changes or re-enrolls Face ID / Touch ID, the key becomes permanently inaccessible. Delete and regenerate the key after detecting enrollment changes. Use `BIOMETRY_OR_PASSCODE` if you need a passcode fallback.
+</Warning>
+
+## Signing and verification
+
+iOS signs data using `SecKeyCreateSignature` with `.ecdsaSignatureMessageX962SHA256`. The digest (SHA-256) is computed inside the enclave; only the raw data string is passed in. The resulting signature is returned in **ASN.1 DER** format, base64-encoded.
+
+<Note>
+  Android and iOS both return DER-encoded signatures. The web layer produces IEEE P1363 (raw) format and uses `p1363ToDer` internally before returning. Use the `derToP1363` / `p1363ToDer` utility functions if your server expects a specific format.
+</Note>
+
+```typescript
+import { CryptoApi, derToP1363 } from '@perfood/capacitor-crypto-api';
+
+// Sign a server challenge
+const { signature } = await CryptoApi.sign({
+  tag: 'com.example.auth-key',
+  data: serverChallenge,
+  // type: 'BIOMETRY' — omit if key was created without biometry
+});
+
+// Convert DER → P1363 if your backend expects raw IEEE P1363 format
+const p1363Bytes = derToP1363(base64ToArrayBuffer(signature));
+
+// Verify with a peer's public key (no private key needed)
+const { verified } = await CryptoApi.verify({
+  foreignPublicKey: peerPublicKeyBase64,
+  data: serverChallenge,
+  signature,
+});
+```
+
+### iOS-specific error codes from `sign`
+
+When a biometry-protected signing operation fails, the Swift plugin maps `LAError` codes to string rejection codes that you can catch:
+
+| Rejection code    | `LAError` cause                    | Meaning                                                        |
+|-------------------|------------------------------------|----------------------------------------------------------------|
+| `user_cancelled`  | `LAError.userCancel`               | The user tapped **Cancel** in the biometry dialog              |
+| `lockout`         | `LAError.biometryLockout`          | Too many failed attempts; biometry is temporarily locked       |
+| `signing_failed`  | Any other `LAError` or crypto error| Generic failure — inspect `message` for details                |
+
+```typescript
+try {
+  const { signature } = await CryptoApi.sign({
+    tag: 'com.example.biometric-key',
+    data: challenge,
+    type: 'BIOMETRY',
+  });
+} catch (err: any) {
+  if (err.code === 'user_cancelled') {
+    // User dismissed the Face ID / Touch ID prompt
+  } else if (err.code === 'lockout') {
+    // Biometry locked — prompt user to enter passcode to unlock
+  } else {
+    console.error('Signing failed:', err.message);
+  }
+}
+```
+
+## Encryption and decryption
+
+The plugin uses **ECDH + AES-GCM** for encryption. The shared secret is derived with `SecKeyCopyKeyExchangeResult` using `.ecdhKeyExchangeStandard`, and the resulting bytes become the AES-GCM symmetric key. The 96-bit IV and 128-bit authentication tag are included in the response.
+
+```typescript
+// Encrypt data for a remote party using your ECDH key and their public key
+const { iv, ciphertext } = await CryptoApi.encrypt({
+  tag: 'com.example.ecdh-key',
+  foreignPublicKey: remotePartyPublicKey,
+  plaintext: 'Hello, Secure Enclave!',
+});
+
+// Decrypt using the same tag and the sender's public key
+const { plaintext } = await CryptoApi.decrypt({
+  tag: 'com.example.ecdh-key',
+  foreignPublicKey: remotePartyPublicKey,
+  iv,
+  ciphertext,
+});
+```
+
+## Biometrics
+
+iOS biometry checks go through `LAContext` from the `LocalAuthentication` framework. The `type` parameter controls the `LAPolicy` used:
+
+- `BIOMETRY` → `LAPolicy.deviceOwnerAuthenticationWithBiometrics`
+- `BIOMETRY_OR_PASSCODE` (or any other value) → `LAPolicy.deviceOwnerAuthentication`
+
+`getAvailableHardware` returns `['FACE']` on Face ID devices and `['FINGER']` on Touch ID devices. Iris hardware is not present on iOS.
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+// Check if Face ID / Touch ID is enrolled and available
+const { isEnabled } = await CryptoApi.isBiometricsEnabled({ type: 'BIOMETRY' });
+
+// Get a detailed status code
+const { status } = await CryptoApi.getBiometricsStatus({ type: 'BIOMETRY' });
+// 'SUCCESS' | 'HARDWARE_UNAVAILABLE' | 'NONE_ENROLLED' | 'UNKNOWN'
+
+// Determine hardware type
+const { hardware } = await CryptoApi.getAvailableHardware();
+// ['FACE'] on Face ID devices, ['FINGER'] on Touch ID devices
+
+// Check passcode
+const { isDevicePasscodeSet } = await CryptoApi.isDevicePasscodeSet();
+```
+
+<Accordion title="BiometricsStatus values on iOS">
+| Status | LAError code | Meaning |
+|---|---|---|
+| `SUCCESS` | — | Biometry is enrolled and usable |
+| `HARDWARE_UNAVAILABLE` | `biometryNotAvailable` | Face ID / Touch ID hardware not available |
+| `NONE_ENROLLED` | `biometryNotEnrolled` | No biometric data enrolled |
+| `UNKNOWN` | Any other error or nil | Indeterminate state |
+</Accordion>
+
+## Passkeys (WebAuthn / FIDO2)
+
+Passkey operations on iOS use `AuthenticationServices` (`ASAuthorizationController`). The `PasskeyApi` class wraps `ASAuthorizationPlatformPublicKeyCredentialProvider` and bridges the native callbacks to Capacitor plugin calls.
+
+<Warning>
+  Passkeys require **iOS 16** and an **Associated Domains** entitlement (`webcredentials:your.domain`) in your Xcode project. Without the entitlement the system will reject all registration and authentication requests.
+</Warning>
+
+<Steps>
+  <Step title="Configure Associated Domains">
+    In Xcode, add the `Associated Domains` capability with the entry `webcredentials:your-domain.com`. Your server must host a valid `/.well-known/apple-app-site-association` file.
+  </Step>
+  <Step title="Register a passkey">
+    ```typescript
+    const result = await CryptoApi.registerPasskey({
+      challenge: serverChallenge,           // base64url string
+      rp: { id: 'your-domain.com', name: 'My App' },
+      user: {
+        id: userId,                         // base64url string
+        name: 'user@example.com',
+        displayName: 'Alice',
+      },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      authenticatorSelection: {
+        residentKey: 'required',
+        userVerification: 'preferred',
+      },
+      extensions: { credProps: true },
+    });
+    // result.id, result.rawId, result.response.attestationObject, result.response.clientDataJSON
+    ```
+  </Step>
+  <Step title="Authenticate with a passkey">
+    ```typescript
+    const result = await CryptoApi.authenticateWithPasskey({
+      rpId: 'your-domain.com',
+      challenge: serverChallenge,           // base64url string
+      allowCredentials: [{ type: 'public-key', id: credentialId }],
+      userVerification: 'required',
+    });
+    // result.response.authenticatorData, result.response.signature, result.response.clientDataJSON
+    ```
+  </Step>
+</Steps>
+
+All binary fields in passkey results (`id`, `rawId`, attestation, client data, signature) are returned as **base64url-encoded strings** (no padding), matching the WebAuthn specification.
+
+## Full ECDSA authentication flow
+
+The following example walks through the complete cryptographic-challenge flow on iOS, including biometry protection:
+
+```typescript
+import { CryptoApi } from '@perfood/capacitor-crypto-api';
+
+const TAG = 'com.example.user-auth';
+
+// 1. Generate key pair (first run only — idempotent on subsequent calls)
+const { publicKey } = await CryptoApi.generateKey({
+  tag: TAG,
+  algorithm: 'ecdsa',
+  type: 'BIOMETRY_OR_PASSCODE',
+});
+
+// 2. Register publicKey with your server
+await fetch('/api/register', {
+  method: 'POST',
+  body: JSON.stringify({ publicKey }),
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// 3. At login: fetch a challenge, sign it, send signature to server
+const { challenge } = await fetch('/api/challenge').then(r => r.json());
+
+const { signature } = await CryptoApi.sign({
+  tag: TAG,
+  data: challenge,
+  type: 'BIOMETRY_OR_PASSCODE', // prompts Face ID / Touch ID
+});
+
+const { verified } = await fetch('/api/verify', {
+  method: 'POST',
+  body: JSON.stringify({ challenge, signature }),
+  headers: { 'Content-Type': 'application/json' },
+}).then(r => r.json());
+```
+
+## Platform behaviour summary
+
+<CardGroup cols={2}>
+  <Card title="Key storage" icon="lock">
+    All private keys live inside the Secure Enclave and are bound to `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. They survive app reinstalls but are tied to the device.
+  </Card>
+  <Card title="Algorithms" icon="code">
+    P-256 (secp256r1) for both ECDSA (SHA-256 digest) and ECDH. No RSA or other curves are supported by the Secure Enclave.
+  </Card>
+  <Card title="Signature format" icon="file-signature">
+    Signatures are returned in **ASN.1 DER** format, base64-encoded. Use `derToP1363` if your server expects IEEE P1363 raw format.
+  </Card>
+  <Card title="hasSecureHardware" icon="microchip">
+    Always `true` on iOS — every supported device has a Secure Enclave.
+  </Card>
+</CardGroup>
